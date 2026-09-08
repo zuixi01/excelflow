@@ -45,6 +45,17 @@ merchant_reconciliation_service = MerchantReconciliationService(service)
 redis_url = os.environ.get("REDIS_URL")
 task_queue = RedisJobQueue(redis_url) if redis_url else None
 app = FastAPI(title="Excel Standard Auditor", version="0.1.0")
+from .workflow.routes import build_router as build_workflow_router
+from .workflow.models import WorkflowError
+
+app.include_router(build_workflow_router(DATA_ROOT, database, task_queue))
+
+
+@app.exception_handler(WorkflowError)
+async def workflow_error(request: Request, exc: WorkflowError) -> JSONResponse:
+    return JSONResponse(status_code=exc.status, content={"detail": str(exc), "code": exc.code})
+
+
 api_token = os.environ.get("EXCEL_AUDITOR_API_TOKEN")
 require_auth = os.environ.get("EXCEL_AUDITOR_REQUIRE_AUTH") == "1"
 token_registry: dict[str, dict[str, str]] = {}

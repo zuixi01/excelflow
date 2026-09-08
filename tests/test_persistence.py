@@ -74,7 +74,7 @@ def test_alembic_initial_migration_builds_expected_schema(tmp_path, monkeypatch)
     config.set_main_option("sqlalchemy.url", f"sqlite:///{database_path.as_posix()}")
     command.upgrade(config, "head")
     tables = set(inspect(create_engine(f"sqlite:///{database_path}")).get_table_names())
-    assert {"schemas", "schema_versions", "standard_connections", "standard_snapshots", "comparison_jobs", "comparison_differences", "audit_events", "alembic_version"} <= tables
+    assert {"schemas", "schema_versions", "standard_connections", "standard_snapshots", "comparison_jobs", "comparison_differences", "audit_events", "alembic_version", "workflow_objects", "workflow_records", "workflow_revisions"} <= tables
 
 
 def test_expired_job_purge_removes_job_differences_and_unreferenced_snapshot_but_keeps_audit(tmp_path, monkeypatch):
