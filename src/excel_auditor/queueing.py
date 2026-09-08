@@ -74,5 +74,26 @@ class RedisJobQueue:
             failure_ttl=86400,
         )
 
+    def enqueue_merchant_reconciliation(
+        self,
+        data_root: Path,
+        job_id: str,
+        excel_path: Path,
+        platform_path: Path | None,
+        name_match_threshold: float,
+    ) -> None:
+        self.queue.enqueue(
+            "excel_auditor.worker.run_merchant_reconciliation_job",
+            str(data_root),
+            job_id,
+            str(excel_path),
+            str(platform_path) if platform_path else None,
+            name_match_threshold,
+            job_id="rq_merchant_" + job_id,
+            job_timeout=900,
+            result_ttl=3600,
+            failure_ttl=86400,
+        )
+
     def ping(self) -> None:
         self.connection.ping()

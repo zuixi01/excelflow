@@ -35,4 +35,10 @@ pnpm --dir apps/web build
 
 示例规则在 `configs/examples/employee-roster.yaml`。开发环境可使用 `deploy/docker-compose.yaml`；生产发布只能使用 `deploy/docker-compose.prod.yaml` 和不可变的 Git SHA/digest 镜像，服务器不执行构建。
 
+## 商家商品合并
+
+`POST /api/v1/merchant-product-reconciliations` 接收一个包含多个商家工作表的 `.xlsx` 或 `.xlsm` 文件。系统自动识别商品表、映射固定字段并生成新的 `商品汇总`、`问题清单` 和隐藏的 `_来源追踪` 工作表。接口不修改上传文件。
+
+开发和验收阶段可通过可选表单字段 `platform_json` 传入平台商品 fixture，通过 `name_match_threshold` 调整商品名称匹配阈值，默认值为 `90`。真实平台接口接入后只需实现平台商品源适配器，抽取、匹配、比较和输出逻辑保持不变。
+
 实现状态见 `docs/implementation-status.md`，逐项验收证据见 `docs/requirements-evidence-matrix.md`，构建与回滚规则见 `docs/deployment.md`。

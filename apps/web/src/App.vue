@@ -1,17 +1,15 @@
 <script setup lang="ts">
 import { computed, onUnmounted, ref } from "vue";
 
-type JobStatus = { job_id: string; status: string; progress: number; workflow?: string; summary?: Record<string, number>; warnings?: string[]; artifacts?: Record<string, string>; error_message_safe?: string; category_count?: number; unresolved_row_count?: number; review_count?: number; issue_count?: number; revision_number?: number };
+type JobStatus = { job_id: string; status: string; progress: number; workflow?: string; summary?: Record<string, number>; warnings?: string[]; artifacts?: Record<string, string>; error_message_safe?: string; category_count?: number; unresolved_row_count?: number; review_count?: number; issue_count?: number; revision_number?: number; platform_provided?: boolean };
 type Difference = { difference_id: string; type: string; severity: string; sheet_id: string; sheet_name: string; cell?: string; excel_row?: number; canonical_field?: string; business_key?: Record<string, unknown>; excel_raw_value?: unknown; excel_normalized_value?: unknown; standard_raw_value?: unknown; standard_normalized_value?: unknown; rule_id?: string; message: string; repair_status: string };
 type ReviewCandidate = { field_id: string; title: string; confidence: number; match_value: string };
 type ProductReview = { review_id: string; review_type: string; review_key: string; status: string; payload: { message: string; raw_header?: string; physical_column?: number; excel_row?: number; candidates: ReviewCandidate[] }; decision?: Record<string, unknown> };
-type ProductIssue = { issue_type: string; excel_row: number; category_id?: string; field_id?: string; raw_value?: unknown; message: string; color: string };
+type ProductIssue = { issue_type: string; severity?: string; excel_row?: number; source_row?: number; source_sheet?: string; category_id?: string; field_id?: string; field_title?: string; raw_value?: unknown; merchant_value?: unknown; platform_value?: unknown; match_score?: number; message: string; color?: string };
 
 const tab = ref<"tasks" | "products" | "rules">("products");
 const schemaId = ref("employee-roster");
 const schemaVersion = ref("1.0.0");
-const productSchemaId = ref("product-normalization");
-const productSchemaVersion = ref("1.0.0");
 const excel = ref<File>();
 const standard = ref<File>();
 const managedSource = ref(false);
@@ -27,7 +25,7 @@ const precheckResult = ref<Record<string, unknown>>();
 const productReviews = ref<ProductReview[]>([]);
 const productIssues = ref<ProductIssue[]>([]);
 const productIssueTotal = ref(0);
-const productIssueFilters = ref({ issue_type: "", category_id: "", field_id: "" });
+const productIssueFilters = ref({ issue_type: "", source_sheet: "", field_id: "" });
 const reviewBusy = ref("");
 let timer: number | undefined;
 
@@ -41,6 +39,9 @@ const mapping = ref({ sheet_id: "", raw_header: "", canonical_field: "" });
 
 const finished = computed(() => ["completed", "failed", "manual_review", "cancelled"].includes(job.value?.status ?? ""));
 const allProductReviewsResolved = computed(() => productReviews.value.length > 0 && productReviews.value.every(item => item.status === "resolved"));
+const productWorkflow = computed(() => ["product_normalization", "merchant_product_reconciliation"].includes(job.value?.workflow ?? ""));
+const merchantWorkflow = computed(() => job.value?.workflow === "merchant_product_reconciliation");
+const statusLabel = computed(() => ({ queued: "等待处理", discovering: "识别工作表", matching: "匹配商品", rendering: "生成结果", completed: "处理完成", failed: "处理失败", cancelled: "已取消", manual_review: "等待审核" }[job.value?.status ?? ""] || job.value?.status || ""));
 
 function choose(event: Event, target: "excel" | "standard") {
   const file = (event.target as HTMLInputElement).files?.[0];
@@ -88,25 +89,24 @@ async function submit() {
 async function submitProduct() {
   error.value = "";
   if (!excel.value) { error.value = "请选择需要整理的商品 Excel。"; return; }
-  busy.value = true; productReviews.value = [];
+  busy.value = true; productReviews.value = []; productIssues.value = []; productIssueTotal.value = 0;
   const body = new FormData();
   body.append("excel_file", excel.value);
-  body.append("schema_id", productSchemaId.value); body.append("schema_version", productSchemaVersion.value);
   try {
-    const response = await apiFetch("/api/v1/product-normalizations", { method: "POST", headers: { "Idempotency-Key": crypto.randomUUID() }, body });
+    const response = await apiFetch("/api/v1/merchant-product-reconciliations", { method: "POST", headers: { "Idempotency-Key": crypto.randomUUID() }, body });
     if (!response.ok) throw new Error(await problem(response));
     job.value = await response.json();
     timer = window.setInterval(refresh, 1000); await refresh();
   } catch (caught) { error.value = caught instanceof Error ? caught.message : "商品整理任务创建失败"; busy.value = false; }
 }
 
-async function precheck(productWorkflow = false) {
+async function precheck() {
   error.value = ""; precheckResult.value = undefined;
   if (!excel.value) { error.value = "请先选择待核验 Excel。"; return; }
   const body = new FormData();
   body.append("excel_file", excel.value);
-  body.append("schema_id", productWorkflow ? productSchemaId.value : schemaId.value);
-  body.append("schema_version", productWorkflow ? productSchemaVersion.value : schemaVersion.value);
+  body.append("schema_id", schemaId.value);
+  body.append("schema_version", schemaVersion.value);
   const response = await apiFetch("/api/v1/workbooks/precheck", { method: "POST", body });
   if (!response.ok) { error.value = await problem(response); return; }
   precheckResult.value = await response.json();
@@ -121,6 +121,7 @@ async function refresh() {
   if (finished.value) {
     window.clearInterval(timer); busy.value = false;
     if (current.workflow === "product_normalization") { await loadProductReviews(); await loadProductIssues(); }
+    else if (current.workflow === "merchant_product_reconciliation") await loadProductIssues();
     else if (["completed", "manual_review"].includes(current.status)) await loadDifferences();
   }
 }
@@ -135,8 +136,12 @@ async function loadProductReviews() {
 async function loadProductIssues() {
   if (!job.value) return;
   const query = new URLSearchParams({ page: "1", page_size: "200" });
-  Object.entries(productIssueFilters.value).forEach(([key, value]) => { if (value) query.set(key, value); });
-  const response = await apiFetch(`/api/v1/product-normalizations/${job.value.job_id}/issues?${query}`);
+  Object.entries(productIssueFilters.value).forEach(([key, value]) => {
+    if (!value) return;
+    query.set(key === "source_sheet" && !merchantWorkflow.value ? "category_id" : key, value);
+  });
+  const base = merchantWorkflow.value ? "/api/v1/merchant-product-reconciliations" : "/api/v1/product-normalizations";
+  const response = await apiFetch(`${base}/${job.value.job_id}/issues?${query}`);
   if (!response.ok) { error.value = await problem(response); return; }
   const payload = await response.json(); productIssues.value = payload.items; productIssueTotal.value = payload.total;
 }
@@ -266,7 +271,7 @@ onUnmounted(() => window.clearInterval(timer));
         <label class="drop"><span>待核验 Excel</span><strong>{{ excel?.name || "选择 .xlsx / .xlsm 文件" }}</strong><input type="file" accept=".xlsx,.xlsm" @change="choose($event, 'excel')" /></label>
         <label class="drop" :class="{ disabled: managedSource }"><span>标准数据</span><strong>{{ managedSource ? "由已配置的受管 HTTP 连接获取" : (standard?.name || "选择 JSON 或 CSV 文件") }}</strong><input type="file" accept=".json,.csv" :disabled="managedSource" @change="choose($event, 'standard')" /></label>
         <label class="toggle"><input v-model="managedSource" type="checkbox" /> 使用规则中的受管 HTTP 标准源</label>
-        <div class="actions"><button class="secondary" :disabled="busy" @click="precheck(false)">工作簿预检查</button><button class="primary" :disabled="busy" @click="submit">{{ busy ? "正在核验…" : "创建核验任务" }}</button></div>
+        <div class="actions"><button class="secondary" :disabled="busy" @click="precheck">工作簿预检查</button><button class="primary" :disabled="busy" @click="submit">{{ busy ? "正在核验…" : "创建核验任务" }}</button></div>
         <p v-if="error" class="error">{{ error }}</p>
         <pre v-if="precheckResult" class="message">{{ JSON.stringify(precheckResult, null, 2) }}</pre>
       </section>
@@ -288,26 +293,24 @@ onUnmounted(() => window.clearInterval(timer));
 
     <template v-else-if="tab === 'products'">
       <section class="panel form-panel product-intro">
-        <div class="product-heading"><div><p class="eyebrow">PRODUCT NORMALIZATION</p><h2>平台类目驱动的商品表整理</h2><p>固定字段在前，平台属性与规格字段居中，商家自定义字段完整保留在最右侧。模糊匹配必须人工确认。</p></div><ol><li>上传商家商品表</li><li>解析类目与平台字段</li><li>处理待审核项</li><li>下载商品表与 SKU 表</li></ol></div>
-        <div class="field"><label for="product-schema">商品规则 ID</label><input id="product-schema" v-model="productSchemaId" /></div>
-        <div class="field"><label for="product-version">规则版本</label><input id="product-version" v-model="productSchemaVersion" /></div>
+        <div class="product-heading"><div><p class="eyebrow">PRODUCT RECONCILIATION</p><h2>商家商品合并</h2></div><span class="interface-status">平台接口待接入</span></div>
         <label class="drop"><span>商家商品 Excel</span><strong>{{ excel?.name || "选择 .xlsx / .xlsm 文件" }}</strong><input type="file" accept=".xlsx,.xlsm" @change="choose($event, 'excel')" /></label>
-        <div class="actions"><button class="secondary" :disabled="busy" @click="precheck(true)">先做安全预检查</button><button class="primary" :disabled="busy" @click="submitProduct">{{ busy ? "正在处理…" : "开始整理商品表" }}</button></div>
+        <div class="actions"><button class="primary" :disabled="busy" @click="submitProduct">{{ busy ? "正在处理…" : "生成商品汇总" }}</button></div>
         <p v-if="error" class="error">{{ error }}</p>
-        <pre v-if="precheckResult" class="message">{{ JSON.stringify(precheckResult, null, 2) }}</pre>
       </section>
-      <section v-if="job?.workflow === 'product_normalization'" class="panel result">
-        <div class="status"><div><span>任务 {{ job.job_id }} · 修订 {{ job.revision_number || 1 }}</span><h2>{{ job.status }}</h2></div><strong>{{ job.progress || 0 }}%</strong></div>
+      <section v-if="job && productWorkflow" class="panel result">
+        <div class="status"><div><span>任务 {{ job?.job_id }}</span><h2>{{ statusLabel }}</h2></div><strong>{{ job?.progress || 0 }}%</strong></div>
         <div class="bar"><i :style="{ width: `${job.progress || 0}%` }" /></div>
-        <div class="metrics product-metrics"><article><strong>{{ job.category_count || 0 }}</strong><span>已解析类目</span></article><article><strong>{{ job.unresolved_row_count || 0 }}</strong><span>未解析商品</span></article><article><strong>{{ productReviews.filter(item => item.status === 'pending').length }}</strong><span>待人工确认</span></article><article><strong>{{ job.issue_count || 0 }}</strong><span>字段质量问题</span></article></div>
+        <div v-if="merchantWorkflow" class="metrics product-metrics"><article><strong>{{ job?.summary?.recognized_sheets || 0 }}</strong><span>识别工作表</span></article><article><strong>{{ job?.summary?.source_records || 0 }}</strong><span>来源记录</span></article><article><strong>{{ job?.summary?.matched_records || 0 }}</strong><span>平台匹配</span></article><article><strong>{{ job?.summary?.differences || 0 }}</strong><span>字段差异</span></article><article><strong>{{ job?.summary?.merchant_only || 0 }}</strong><span>商家新增</span></article><article><strong>{{ job?.summary?.platform_only || 0 }}</strong><span>平台新增</span></article></div>
+        <div v-else class="metrics product-metrics"><article><strong>{{ job?.category_count || 0 }}</strong><span>已解析类目</span></article><article><strong>{{ job?.unresolved_row_count || 0 }}</strong><span>未解析商品</span></article><article><strong>{{ productReviews.filter(item => item.status === 'pending').length }}</strong><span>待人工确认</span></article><article><strong>{{ job?.issue_count || 0 }}</strong><span>字段质量问题</span></article></div>
         <p v-if="job.error_message_safe" class="error">{{ job.error_message_safe }}</p>
-        <nav v-if="job.artifacts"><button v-if="job.artifacts.product_excel" @click="downloadArtifact('product_excel')">{{ job.status === 'manual_review' ? '下载待审核商品 Excel' : '下载最终商品 Excel' }}</button><button v-if="job.artifacts.product_result" @click="downloadArtifact('product_result')">下载完整结果 JSON</button><button v-if="job.artifacts.product_issues" @click="downloadArtifact('product_issues')">下载问题 JSONL</button><button v-if="job.artifacts.product_manifest" @click="downloadArtifact('product_manifest')">渲染清单</button></nav>
+        <nav v-if="job.artifacts"><button v-if="job.artifacts.product_excel" @click="downloadArtifact('product_excel')">下载商品汇总 Excel</button><button v-if="job.artifacts.product_result" @click="downloadArtifact('product_result')">下载结果 JSON</button><button v-if="job.artifacts.product_issues" @click="downloadArtifact('product_issues')">下载问题 JSONL</button><button v-if="job.artifacts.product_manifest" @click="downloadArtifact('product_manifest')">渲染清单</button></nav>
         <div v-if="productIssues.length || job.issue_count" class="differences">
           <div class="review-title"><div><h3>字段质量问题</h3><p class="muted">与 Excel 内“问题清单”一致；共 {{ productIssueTotal }} 条，当前最多展示 200 条。</p></div></div>
-          <div class="filter-grid product-issue-filter"><input v-model="productIssueFilters.issue_type" placeholder="问题类型" /><input v-model="productIssueFilters.category_id" placeholder="类目 ID" /><input v-model="productIssueFilters.field_id" placeholder="字段 ID" /><button class="secondary" @click="loadProductIssues">筛选</button></div>
-          <div class="table-wrap"><table><thead><tr><th>源行</th><th>类目</th><th>字段</th><th>类型</th><th>原值</th><th>说明</th></tr></thead><tbody><tr v-for="item in productIssues" :key="`${item.excel_row}-${item.category_id}-${item.field_id}-${item.issue_type}`"><td>{{ item.excel_row }}</td><td>{{ item.category_id || '—' }}</td><td>{{ item.field_id || '—' }}</td><td>{{ item.issue_type }}</td><td>{{ JSON.stringify(item.raw_value) }}</td><td>{{ item.message }}</td></tr></tbody></table></div>
+          <div class="filter-grid product-issue-filter"><input v-model="productIssueFilters.issue_type" placeholder="问题类型" /><input v-model="productIssueFilters.source_sheet" :placeholder="merchantWorkflow ? '来源工作表' : '类目 ID'" /><input v-model="productIssueFilters.field_id" placeholder="字段 ID" /><button class="secondary" @click="loadProductIssues">筛选</button></div>
+          <div class="table-wrap"><table><thead><tr><th>来源</th><th>字段</th><th>类型</th><th>商家值</th><th>平台值</th><th>匹配分数</th><th>说明</th></tr></thead><tbody><tr v-for="item in productIssues" :key="`${item.source_sheet || item.category_id}-${item.source_row || item.excel_row}-${item.field_id}-${item.issue_type}`"><td>{{ item.source_sheet || item.category_id || '—' }} {{ item.source_row || item.excel_row || '' }}</td><td>{{ item.field_title || item.field_id || '—' }}</td><td>{{ item.issue_type }}</td><td>{{ JSON.stringify(item.merchant_value ?? item.raw_value) }}</td><td>{{ JSON.stringify(item.platform_value) }}</td><td>{{ item.match_score ?? '—' }}</td><td>{{ item.message }}</td></tr></tbody></table></div>
         </div>
-        <div v-if="productReviews.length" class="review-workbench">
+        <div v-if="job.workflow === 'product_normalization' && productReviews.length" class="review-workbench">
           <div class="review-title"><div><h3>人工审核工作台</h3><p class="muted">候选项只提供依据，不会自动写入。每个决定都会进入修订历史。</p></div><button v-if="allProductReviewsResolved" class="primary" :disabled="busy" @click="createProductRevision">应用决定并生成新修订</button></div>
           <article v-for="review in productReviews" :key="review.review_id" class="review-card" :class="{ resolved: review.status === 'resolved' }">
             <header><div><span class="review-type">{{ review.review_type }}</span><strong>{{ review.payload.message }}</strong></div><span class="review-status">{{ review.status }}</span></header>

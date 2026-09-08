@@ -79,6 +79,24 @@ def run_product_revision(
     )
 
 
+def run_merchant_reconciliation_job(
+    data_root: str,
+    job_id: str,
+    excel_path: str,
+    platform_path: str | None,
+    name_match_threshold: float,
+) -> None:
+    from .product_workflow.merchant_service import MerchantReconciliationService
+
+    service, _managed, _database = _build_runtime(Path(data_root))
+    MerchantReconciliationService(service).run(
+        job_id,
+        Path(excel_path),
+        Path(platform_path) if platform_path else None,
+        name_match_threshold=name_match_threshold,
+    )
+
+
 def _build_runtime(data_root: Path) -> tuple[AuditService, ManagedHttpSource | None, DatabaseRepository | None]:
     connections_path = os.environ.get("EXCEL_AUDITOR_CONNECTIONS")
     managed = ManagedHttpSource(ConnectionRegistry(Path(connections_path))) if connections_path else None

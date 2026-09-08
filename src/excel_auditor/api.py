@@ -27,6 +27,7 @@ from .rendering import DotNetOpenXmlRenderer
 from .observability import configure_logging, metrics
 from .strict_serialization import dump_json_exact, load_json_strict
 from .product_workflow import ManagedHttpCatalogAdapter, ProductReviewDecision
+from .product_workflow.merchant_service import MerchantReconciliationService
 from .product_workflow.service import ProductWorkflowService
 
 
@@ -40,6 +41,7 @@ s3_bucket = os.environ.get("S3_BUCKET")
 artifact_store = S3ArtifactStore(s3_bucket, os.environ.get("S3_ENDPOINT_URL"), os.environ.get("AWS_REGION"), os.environ.get("S3_SERVER_SIDE_ENCRYPTION", "AES256")) if s3_bucket else None
 service = AuditService(DATA_ROOT, managed_http=managed_http, database=database, artifact_store=artifact_store)
 product_service = ProductWorkflowService(service, database)
+merchant_reconciliation_service = MerchantReconciliationService(service)
 redis_url = os.environ.get("REDIS_URL")
 task_queue = RedisJobQueue(redis_url) if redis_url else None
 app = FastAPI(title="Excel Standard Auditor", version="0.1.0")
@@ -519,6 +521,133 @@ async def create_product_normalization(
         raise HTTPException(429 if "TENANT_QUOTA_EXCEEDED" in str(exc) else 422, str(exc)) from exc
 
 
+@app.post("/api/v1/merchant-product-reconciliations", status_code=202)
+async def create_merchant_product_reconciliation(
+    request: Request,
+    background_tasks: BackgroundTasks,
+    excel_file: UploadFile = File(...),
+    platform_json: str | None = Form(default=None),
+    name_match_threshold: float = Form(default=90, ge=0, le=100),
+    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
+):
+    suffix = Path(excel_file.filename or "input.xlsx").suffix.lower()
+    if suffix not in {".xlsx", ".xlsm"}:
+        raise HTTPException(415, "FILE_UNSUPPORTED_FORMAT")
+    upload_limit = int(os.environ.get("EXCEL_AUDITOR_MERCHANT_UPLOAD_MIB", "50")) * 1024 * 1024
+    content = await excel_file.read(upload_limit + 1)
+    if len(content) > upload_limit:
+        raise HTTPException(413, "FILE_LIMIT_EXCEEDED")
+
+    platform_content: bytes | None = None
+    if platform_json is not None:
+        platform_limit = int(os.environ.get("EXCEL_AUDITOR_PLATFORM_FIXTURE_MIB", "10")) * 1024 * 1024
+        if len(platform_json.encode("utf-8")) > platform_limit:
+            raise HTTPException(413, "PLATFORM_DATA_INVALID: payload too large")
+        try:
+            platform_payload = load_json_strict(platform_json, context="platform fixture JSON", preserve_decimal=True)
+        except ValueError as exc:
+            raise HTTPException(422, "PLATFORM_DATA_INVALID: invalid JSON") from exc
+        if not isinstance(platform_payload, (dict, list)):
+            raise HTTPException(422, "PLATFORM_DATA_INVALID: root must be an object or array")
+        platform_content = dump_json_exact(
+            platform_payload,
+            ensure_ascii=False,
+            sort_keys=True,
+        ).encode("utf-8")
+
+    fingerprint = hashlib.sha256()
+    fingerprint.update(b"merchant-product-reconciliation\0")
+    fingerprint.update(str(name_match_threshold).encode("ascii"))
+    fingerprint.update(suffix.encode("ascii"))
+    fingerprint.update(content)
+    if platform_content is not None:
+        fingerprint.update(platform_content)
+    try:
+        job_id, replayed = service.create_or_get_job(
+            idempotency_key,
+            fingerprint.hexdigest(),
+            request.state.tenant_id,
+            request.state.user_id,
+            request.state.trace_id,
+        )
+        if replayed:
+            return JSONResponse(status_code=200, content={**service.status(job_id), "idempotent_replay": True})
+        directory = service.job_directory(job_id)
+        service.record_input_metadata(job_id, excel_file.filename or f"upload{suffix}", len(content))
+        excel_path = directory / f"merchant-input{suffix}"
+        excel_path.write_bytes(content)
+        platform_path = None
+        if platform_content is not None:
+            platform_path = directory / "platform-fixture.json"
+            platform_path.write_bytes(platform_content)
+        if task_queue:
+            try:
+                task_queue.enqueue_merchant_reconciliation(
+                    DATA_ROOT,
+                    job_id,
+                    excel_path,
+                    platform_path,
+                    name_match_threshold,
+                )
+            except Exception as exc:
+                raise HTTPException(503, "task queue is unavailable") from exc
+        else:
+            background_tasks.add_task(
+                merchant_reconciliation_service.run,
+                job_id,
+                excel_path,
+                platform_path,
+                name_match_threshold=name_match_threshold,
+            )
+        return {
+            "job_id": job_id,
+            "status": "queued",
+            "workflow": "merchant_product_reconciliation",
+            "platform_provided": platform_path is not None,
+            "name_match_threshold": name_match_threshold,
+        }
+    except FileExistsError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(429 if "TENANT_QUOTA_EXCEEDED" in str(exc) else 422, str(exc)) from exc
+
+
+@app.get("/api/v1/merchant-product-reconciliations/{job_id}/issues")
+def list_merchant_product_issues(
+    job_id: str,
+    request: Request,
+    issue_type: str | None = None,
+    source_sheet: str | None = None,
+    field_id: str | None = None,
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=50, ge=1, le=200),
+) -> dict[str, Any]:
+    _authorize_job(request, job_id)
+    try:
+        path = service.artifact(job_id, "product_issues")
+    except FileNotFoundError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    start = (page - 1) * page_size
+    stop = start + page_size
+    total = 0
+    items: list[dict[str, Any]] = []
+    with path.open("r", encoding="utf-8") as handle:
+        for line in handle:
+            if not line.strip():
+                continue
+            item = json.loads(line)
+            if issue_type and item.get("issue_type") != issue_type:
+                continue
+            if source_sheet and item.get("source_sheet") != source_sheet:
+                continue
+            if field_id and item.get("field_id") != field_id:
+                continue
+            if start <= total < stop:
+                items.append(item)
+            total += 1
+    return {"items": items, "page": page, "page_size": page_size, "total": total}
+
+
 @app.get("/api/v1/product-normalizations/{job_id}/reviews")
 def list_product_reviews(
     job_id: str,
@@ -736,7 +865,7 @@ def get_artifact(job_id: str, artifact: str, request: Request):
     except FileNotFoundError as exc:
         raise HTTPException(404, str(exc)) from exc
     excel_media = "application/vnd.ms-excel.sheet.macroEnabled.12" if path.suffix.lower() == ".xlsm" else "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-    media = {"excel": excel_media, "json": "application/json", "differences_jsonl": "application/x-ndjson", "html": "text/html", "manifest": "application/json", "product_result": "application/json", "product_excel": excel_media, "product_manifest": "application/json"}[artifact]
+    media = {"excel": excel_media, "json": "application/json", "differences_jsonl": "application/x-ndjson", "html": "text/html", "manifest": "application/json", "product_result": "application/json", "product_excel": excel_media, "product_manifest": "application/json", "product_issues": "application/x-ndjson"}[artifact]
     if database:
         database.audit("comparison.artifact_downloaded", "comparison_job", job_id, request.state.user_id, {"artifact": artifact}, request.state.tenant_id)
     return FileResponse(path, media_type=media, filename=path.name)
