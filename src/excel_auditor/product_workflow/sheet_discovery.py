@@ -144,7 +144,7 @@ def _header_depth(sheet: Worksheet, header_row: int, last_row: int, last_column:
             ]
             if sum(bool(value) for value in child_values) >= 2:
                 depth = max(depth, 2)
-    return min(depth, max(1, last_row - header_row))
+    return min(depth, max(1, last_row - header_row + 1))
 
 
 def _is_output_template(sheet: Worksheet, last_row: int, last_column: int) -> bool:

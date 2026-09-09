@@ -4,6 +4,7 @@ import hashlib
 import itertools
 import json
 import re
+import unicodedata
 import zipfile
 from copy import copy
 from datetime import date, datetime
@@ -12,7 +13,7 @@ from pathlib import Path
 from typing import Any
 
 from openpyxl import Workbook, load_workbook
-from openpyxl.styles import Alignment, Font, PatternFill
+from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
 from openpyxl.worksheet.datavalidation import DataValidation
 
@@ -71,14 +72,23 @@ def safe_book(path: Path):
             if total_cells > MAX_CELLS:
                 raise WorkflowError("工作簿数据区域超过 200 万单元格。")
         book = load_workbook(path, keep_links=False)
-        if len(book.worksheets) > 50 or sum(s.max_row * s.max_column for s in book.worksheets) > MAX_CELLS:
+        dimensions = [_content_bounds(sheet) for sheet in book.worksheets]
+        if len(book.worksheets) > 50 or any(row > MAX_ROWS + 100 or column > MAX_COLUMNS for row, column in dimensions) or sum(row * column for row, column in dimensions) > MAX_CELLS:
             book.close()
-            raise WorkflowError("工作表数量或格式区域超出当前容量，请清理多余空白格式。")
+            raise WorkflowError("工作表数量或实际数据区域超出当前容量，请拆分后重试。")
         return book
     except WorkflowError:
         raise
     except Exception as exc:
         raise WorkflowError("无法解析工作簿，请检查文件是否完整且为有效 .xlsx。") from exc
+
+
+def _content_bounds(sheet) -> tuple[int, int]:
+    """Return the real data extent, ignoring Excel's trailing empty formatting."""
+    content = [cell for cell in sheet._cells.values() if cell.value is not None]
+    if not content:
+        return 0, 0
+    return max(cell.row for cell in content), max(cell.column for cell in content)
 
 
 def field_matches(header: str, fields: list[MaintenanceField]) -> list[str]:
@@ -100,8 +110,11 @@ def discover(path: Path, fields: list[MaintenanceField], *, template: bool = Fal
         for sheet in book.worksheets:
             if sheet.sheet_state != "visible":
                 continue
+            last_row, last_column = _content_bounds(sheet)
+            if not last_row or not last_column:
+                continue
             rows = []
-            for row in sheet.iter_rows():
+            for row in sheet.iter_rows(max_row=last_row, max_col=last_column):
                 values = []
                 for cell in row:
                     if cell.data_type == "f" and not template:
@@ -115,15 +128,23 @@ def discover(path: Path, fields: list[MaintenanceField], *, template: bool = Fal
                 rows.pop()
             if not rows:
                 continue
-            last_column = max((index + 1 for row in rows for index, value in enumerate(row) if value), default=0)
-            if not last_column:
-                continue
-            # Prefer known business headers, then rows containing several distinct labels.
+            # Prefer a row that starts a merged, multi-level header when present.  A
+            # maintenance template may use entirely custom field names, so known
+            # product-field aliases alone cannot decide where its header starts.
             scores = []
             for index, row in enumerate(rows[:50]):
                 known = sum(bool(field_matches(value, fields)) for value in row if value)
                 labels = sum(bool(value) and not re.fullmatch(r"[-+]?\d+(?:\.\d+)?", value) for value in row)
-                scores.append((known * 100 + min(labels, 20), -index))
+                structural = 0
+                if template and index + 1 < len(rows):
+                    for region in sheet.merged_cells.ranges:
+                        if region.min_row != index + 1 or region.max_col <= region.min_col:
+                            continue
+                        child_count = sum(bool(rows[index + 1][column - 1]) for column in range(region.min_col, region.max_col + 1)
+                                          if column <= len(rows[index + 1]))
+                        if child_count >= 2:
+                            structural += 1
+                scores.append((structural * 10000 + known * 100 + min(labels, 20), -index))
             header_row = -max(scores)[1] + 1
             depth = _header_depth(sheet, header_row, len(rows), last_column)
             merged = merged_value_map(sheet, last_row=len(rows), last_column=last_column)
@@ -265,16 +286,72 @@ def typed_cell(cell, value: str, rule: ColumnRule | None):
         cell.value = value
 
 
+_GRID_SIDE = Side(style="thin", color="D9D9D9")
+_GRID_BORDER = Border(left=_GRID_SIDE, right=_GRID_SIDE, top=_GRID_SIDE, bottom=_GRID_SIDE)
+
+
 def style_header(sheet, row: int, titles: list[str]):
     for column, title in enumerate(titles, start=1):
         cell = sheet.cell(row, column)
         literal(cell, title)
-        cell.fill = PatternFill("solid", fgColor="E5F1EC")
-        cell.font = Font(name="Microsoft YaHei", bold=True, color="20543E")
-        cell.alignment = Alignment(vertical="center", wrap_text=True)
-        sheet.column_dimensions[get_column_letter(column)].width = 20
-    sheet.row_dimensions[row].height = 32
+        style_header_cell(cell)
+        sheet.column_dimensions[get_column_letter(column)].width = 16
+    sheet.row_dimensions[row].height = 26
     sheet.freeze_panes = f"A{row + 1}"
+
+
+def style_header_cell(cell):
+    cell.fill = PatternFill(fill_type=None)
+    cell.font = Font(name="Microsoft YaHei", bold=True, color="000000")
+    cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+    cell.border = _GRID_BORDER
+
+
+def style_data_cell(cell):
+    cell.alignment = Alignment(vertical="center", wrap_text=True)
+    cell.border = _GRID_BORDER
+
+
+def display_width(value: Any) -> int:
+    """Approximate Excel column width, accounting for full-width characters."""
+    lines = cell_text(value).splitlines() or [""]
+    return max(sum(2 if unicodedata.east_asian_width(char) in {"W", "F", "A"} else 1 for char in line) for line in lines)
+
+
+def _header_paths(titles: list[str]) -> list[list[str]]:
+    return [[part.strip() for part in title.split("/") if part.strip()] or [title] for title in titles]
+
+
+def write_hierarchical_headers(sheet, titles: list[str], *, start_column: int = 1, start_row: int = 1) -> int:
+    """Write slash-delimited field titles as a compact merged Excel header."""
+    paths = _header_paths(titles)
+    depth = max(map(len, paths), default=1)
+    for offset, path in enumerate(paths):
+        column = start_column + offset
+        sheet.column_dimensions[get_column_letter(column)].width = max(10, min(24, max(map(len, path)) * 2 + 4))
+        for level, title in enumerate(path, start=1):
+            literal(sheet.cell(start_row + level - 1, column), title)
+    for offset, path in enumerate(paths):
+        column = start_column + offset
+        for level, title in enumerate(path, start=1):
+            if offset and len(paths[offset - 1]) > level - 1 and paths[offset - 1][:level] == path[:level]:
+                continue
+            end_column = column
+            while end_column - start_column + 1 < len(paths):
+                candidate = paths[end_column - start_column + 1]
+                if len(candidate) <= level - 1 or candidate[:level] != path[:level]:
+                    break
+                end_column += 1
+            end_row = start_row + depth - 1 if level == len(path) else start_row + level - 1
+            current_row = start_row + level - 1
+            for row in range(current_row, end_row + 1):
+                for current_column in range(column, end_column + 1):
+                    style_header_cell(sheet.cell(row, current_column))
+            if end_row > current_row or end_column > column:
+                sheet.merge_cells(start_row=current_row, start_column=column, end_row=end_row, end_column=end_column)
+    for row in range(start_row, start_row + depth):
+        sheet.row_dimensions[row].height = 26
+    return depth
 
 
 def write_maintenance(path: Path, task: dict, rows: list[dict]):
@@ -284,16 +361,25 @@ def write_maintenance(path: Path, task: dict, rows: list[dict]):
     sheet.title = "维护表"
     ids = [f.rule.name for f in config.fields]
     titles = [f.rule.title for f in config.fields]
-    style_header(sheet, 1, ["_workflow_record_id", *titles])
+    header_depth = write_hierarchical_headers(sheet, titles, start_column=2)
+    literal(sheet.cell(1, 1), "_workflow_record_id")
+    style_header_cell(sheet.cell(1, 1))
+    if header_depth > 1:
+        for row in range(2, header_depth + 1):
+            style_header_cell(sheet.cell(row, 1))
+        sheet.merge_cells(start_row=1, start_column=1, end_row=header_depth, end_column=1)
     sheet.column_dimensions["A"].hidden = True
-    for index, record in enumerate(rows, start=2):
+    data_start_row = header_depth + 1
+    for index, record in enumerate(rows, start=data_start_row):
         literal(sheet.cell(index, 1), record["id"])
         for column, field in enumerate(config.fields, start=2):
             # Maintenance transport deliberately uses text to preserve exact round trips.
             literal(sheet.cell(index, column), record["values_json"].get(field.rule.name, ""))
+            style_data_cell(sheet.cell(index, column))
             if any(issue["field"] == field.rule.name for issue in record["issues"]):
                 sheet.cell(index, column).fill = PatternFill("solid", fgColor="FCE8E6")
-    sheet.auto_filter.ref = f"A1:{get_column_letter(len(ids) + 1)}{len(rows) + 1}"
+    sheet.freeze_panes = f"B{data_start_row}"
+    sheet.auto_filter.ref = f"A{header_depth}:{get_column_letter(len(ids) + 1)}{max(header_depth, data_start_row + len(rows) - 1)}"
     meta = book.create_sheet("_workflow_meta")
     meta.sheet_state = "veryHidden"
     meta.append(["task_id", task["id"]])
@@ -301,6 +387,7 @@ def write_maintenance(path: Path, task: dict, rows: list[dict]):
     meta.append(["template_hash", task["payload"]["template_hash"]])
     meta.append(["fields", json.dumps(ids)])
     meta.append(["titles", json.dumps(titles, ensure_ascii=False)])
+    meta.append(["header_depth", header_depth])
     book.save(path)
     book.close()
 
@@ -320,11 +407,14 @@ def read_maintenance(path: Path, task: dict) -> list[dict]:
         if meta.get("fields") != json.dumps(ids):
             raise WorkflowError("维护字段元数据已被修改。")
         sheet = book["维护表"]
+        header_depth = int(meta.get("header_depth", 1))
         titles = ["_workflow_record_id", *(f.rule.title for f in config.fields)]
-        if [cell.value for cell in sheet[1]] != titles:
+        headers = flatten_headers(sheet, merged_value_map(sheet, last_row=header_depth, last_column=len(titles)),
+                                  header_row=1, header_depth=header_depth, last_column=len(titles))
+        if [normalize_header(header) for header in headers] != [normalize_header(title) for title in titles]:
             raise WorkflowError("维护表列结构已改变，请保留原列和表头。")
         rows = []
-        for index, cells in enumerate(sheet.iter_rows(min_row=2), start=2):
+        for index, cells in enumerate(sheet.iter_rows(min_row=header_depth + 1), start=header_depth + 1):
             if not any(cell.value is not None for cell in cells):
                 continue
             if any(cell.data_type == "f" for cell in cells):
@@ -376,25 +466,33 @@ def write_output(path: Path, spec: OutputFile, config: WorkflowConfig, rows: lis
             if any(region.max_row >= plan.data_start_row for region in sheet.merged_cells.ranges):
                 raise WorkflowError("输出模板数据区域存在合并单元格，请仅在表头保留合并区域。")
             styles = [copy(sheet.cell(plan.data_start_row, i)._style) for i in range(1, len(plan.columns) + 1)]
-            if sheet.max_row >= plan.data_start_row:
-                sheet.delete_rows(plan.data_start_row, sheet.max_row - plan.data_start_row + 1)
             headers = flatten_headers(sheet, merged_value_map(sheet, last_row=plan.data_start_row - 1, last_column=sheet.max_column), header_row=plan.header_row,
                                       header_depth=plan.data_start_row - plan.header_row, last_column=sheet.max_column)
-            keep_headers = headers == [column.title for column in plan.columns]
+            titles = [column.title for column in plan.columns]
+            desired_depth = max(map(len, _header_paths(titles)), default=1)
+            keep_headers = ([normalize_header(header) for header in headers] == [normalize_header(title) for title in titles]
+                            and plan.data_start_row - plan.header_row >= desired_depth)
+            header_depth = max(plan.data_start_row - plan.header_row, desired_depth)
+            data_start_row = plan.header_row + header_depth
+            if sheet.max_row >= plan.data_start_row:
+                sheet.delete_rows(plan.data_start_row, sheet.max_row - plan.data_start_row + 1)
             if not keep_headers:
                 for region in list(sheet.merged_cells.ranges):
                     if region.max_row >= plan.header_row:
                         sheet.unmerge_cells(str(region))
-                for header_cells in sheet.iter_rows(min_row=plan.header_row, max_row=plan.data_start_row - 1):
+                for header_cells in sheet.iter_rows(min_row=plan.header_row, max_row=data_start_row - 1):
                     for cell in header_cells:
                         cell.value = None
+                if sheet.max_column > len(plan.columns):
+                    sheet.delete_cols(len(plan.columns) + 1, sheet.max_column - len(plan.columns))
+                write_hierarchical_headers(sheet, titles, start_row=plan.header_row)
+            column_widths = [max(column.width, 10, max(display_width(part) for part in _header_paths([column.title])[0]) + 2)
+                             for column in plan.columns]
             for col_index, column in enumerate(plan.columns, start=1):
-                target = sheet.cell(plan.header_row, col_index)
-                if not keep_headers:
-                    literal(target, column.title)
-                    target.fill = PatternFill("solid", fgColor="E5F1EC")
-                    target.font = Font(name="Microsoft YaHei", bold=True, color="20543E")
-                sheet.column_dimensions[get_column_letter(col_index)].width = column.width
+                sheet.column_dimensions[get_column_letter(col_index)].width = column_widths[col_index - 1]
+            if not reference:
+                for row in range(plan.header_row, data_start_row):
+                    sheet.row_dimensions[row].height = 26
             written = 0
             for record in records_group:
                 dimensions = [[value.strip() for value in record["values_json"].get(field, "").split(plan.sku_separator)] for field in plan.sku_fields]
@@ -404,7 +502,7 @@ def write_output(path: Path, spec: OutputFile, config: WorkflowConfig, rows: lis
                     if written > MAX_ROWS:
                         raise WorkflowError("SKU 展开或输出记录超过每表 20,000 条限制。")
                     values = {**record["values_json"], **dict(zip(plan.sku_fields, combination))}
-                    index = plan.data_start_row + written - 1
+                    index = data_start_row + written - 1
                     for col_index, column in enumerate(plan.columns, start=1):
                         cell = sheet.cell(index, col_index)
                         cell._style = copy(styles[col_index - 1])
@@ -417,10 +515,15 @@ def write_output(path: Path, spec: OutputFile, config: WorkflowConfig, rows: lis
                                 raise WorkflowError(f"{name} 第 {written} 条记录缺少输出必填字段：{column.title}")
                             rule = rules.get(column.field) if column.operation in {"copy", "multiply"} else None
                             typed_cell(cell, value, rule)
+                            column_widths[col_index - 1] = min(60, max(column_widths[col_index - 1], display_width(value) + 2))
+                        if not reference:
+                            style_data_cell(cell)
                         if column.number_format:
                             cell.number_format = column.number_format
-            last = max(plan.data_start_row, plan.data_start_row + written - 1)
-            sheet.freeze_panes = f"A{plan.data_start_row}"
+            for col_index, width in enumerate(column_widths, start=1):
+                sheet.column_dimensions[get_column_letter(col_index)].width = width
+            last = max(data_start_row, data_start_row + written - 1)
+            sheet.freeze_panes = f"A{data_start_row}"
             sheet.auto_filter.ref = f"A{plan.header_row}:{get_column_letter(len(plan.columns))}{last}"
             for col_index, column in enumerate(plan.columns, start=1):
                 rule = rules.get(column.field)
@@ -432,7 +535,7 @@ def write_output(path: Path, spec: OutputFile, config: WorkflowConfig, rows: lis
                         validation.showErrorMessage = True
                         sheet.add_data_validation(validation)
                         letter = get_column_letter(col_index)
-                        validation.add(f"{letter}{plan.data_start_row}:{letter}{last}")
+                        validation.add(f"{letter}{data_start_row}:{letter}{last}")
             stats.append({"sheet": name, "records": written, "columns": len(plan.columns)})
     for existing in list(book.worksheets):
         if existing.sheet_state == "visible" and existing.title.casefold() not in seen_names:

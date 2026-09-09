@@ -482,6 +482,9 @@ def _inspect_sheet_xml_structure(
     max_column = 0
     current_row = 0
     current_column = 0
+    cell_row = 0
+    cell_column = 0
+    cell_has_content = False
 
     def local_name(name: str) -> str:
         return name.rsplit("}", 1)[-1].rsplit(":", 1)[-1].casefold()
@@ -490,7 +493,7 @@ def _inspect_sheet_xml_structure(
         return {local_name(key): value for key, value in attributes.items()}
 
     def start_element(name: str, attributes: dict[str, str]) -> None:
-        nonlocal current_row, current_column, max_row, max_column
+        nonlocal current_row, current_column, max_row, max_column, cell_row, cell_column, cell_has_content
         element = local_name(name)
         feature = element_features.get(element)
         if feature is not None:
@@ -521,11 +524,23 @@ def _inspect_sheet_xml_structure(
                 current_column += 1
                 row_number = current_row
                 column_number = current_column
-            max_row = max(max_row, row_number)
-            max_column = max(max_column, column_number)
+            cell_row = row_number
+            cell_column = column_number
+            cell_has_content = False
+        elif element in {"v", "f", "t"}:
+            # Excel often retains styled but empty cells far outside the real
+            # data area. They must not inflate the workbook's usable bounds.
+            cell_has_content = True
+
+    def end_element(name: str) -> None:
+        nonlocal max_row, max_column
+        if local_name(name) == "c" and cell_has_content:
+            max_row = max(max_row, cell_row)
+            max_column = max(max_column, cell_column)
 
     parser = expat.ParserCreate(namespace_separator="}")
     parser.StartElementHandler = start_element
+    parser.EndElementHandler = end_element
     parser.ExternalEntityRefHandler = lambda *_arguments: 0
     try:
         with archive.open(info) as handle:

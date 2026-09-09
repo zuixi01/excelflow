@@ -115,7 +115,7 @@ class WorkflowConfig(StrictModel):
     unique_key: list[str] = Field(default_factory=list, max_length=10)
     cross_checks: list[CrossCheck] = Field(default_factory=list, max_length=30)
     outputs: list[OutputFile] = Field(min_length=1, max_length=10)
-    preserve_extras: bool = True
+    preserve_extras: bool = False
 
     @model_validator(mode="after")
     def references(self):
@@ -226,6 +226,18 @@ class TemplateEdit(StrictModel):
 
 def content_hash(value: Any) -> str:
     return hashlib.sha256(json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+
+
+def starter_config(name: str = "新业务流程") -> WorkflowConfig:
+    """Provide a neutral editable start for manually created workflows."""
+    field = MaintenanceField(rule=ColumnRule(name="field_1", title="字段1", type="string", normalize=["trim"]))
+    return WorkflowConfig(
+        name=name,
+        fields=[field],
+        outputs=[OutputFile(name="处理结果.xlsx", sheets=[OutputSheet(name="结果", columns=[
+            OutputColumn(title=field.rule.title, field=field.rule.name),
+        ])])],
+    )
 
 
 def default_config() -> WorkflowConfig:

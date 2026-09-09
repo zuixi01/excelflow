@@ -27,6 +27,14 @@ class NewTemplate(StrictModel):
     name: str = Field(default="新业务模板", min_length=1, max_length=100)
 
 
+class DeleteTemplates(StrictModel):
+    ids: list[str] = Field(min_length=1, max_length=100)
+
+
+class DeleteTasks(StrictModel):
+    ids: list[str] = Field(min_length=1, max_length=100)
+
+
 class LearnRequest(RevisionRequest):
     instructions: str = Field(default="", max_length=6000)
 
@@ -34,6 +42,10 @@ class LearnRequest(RevisionRequest):
 class ReturnRequest(StrictModel):
     preview_id: str
     delete_missing: bool = False
+
+
+class ExportRequest(RevisionRequest):
+    output_template_id: str | None = Field(default=None, min_length=1, max_length=64)
 
 
 def guard_origin(request: Request):
@@ -96,7 +108,7 @@ def build_router(data_root: Path, database=None, task_queue=None) -> APIRouter:
 
     @router.get("/workflow-definitions")
     def definitions(request: Request):
-        return {"items": [item for item in templates().list(request.state.tenant_id)["items"] if item["status"] == "published"]}
+        return templates().definitions(request.state.tenant_id)
 
     @router.get("/workflow-examples/source")
     def example():
@@ -117,6 +129,10 @@ def build_router(data_root: Path, database=None, task_queue=None) -> APIRouter:
     def list_tasks(request: Request, search: str = "", status: str = "", offset: int = 0, limit: int = 30):
         return tasks().list(request.state.tenant_id, search[:200], status, max(0, offset), max(1, min(100, limit)))
 
+    @router.delete("/workflow-tasks")
+    def delete_tasks(request: Request, body: DeleteTasks):
+        return tasks().delete(request.state.tenant_id, body.ids)
+
     @router.post("/workflow-tasks", status_code=202)
     async def create_task(request: Request, background: BackgroundTasks, excel_file: UploadFile = File(...),
                           template_id: str = Form(...), name: str = Form(""), idempotency_key: str | None = Header(None, alias="Idempotency-Key")):
@@ -134,6 +150,10 @@ def build_router(data_root: Path, database=None, task_queue=None) -> APIRouter:
     @router.post("/workflow-tasks/{task_id}/mapping")
     def mapping(request: Request, task_id: str, body: MappingRequest):
         return tasks().confirm_mapping(task_id, request.state.tenant_id, request.state.user_id, body)
+
+    @router.post("/workflow-tasks/{task_id}/mapping/reopen")
+    def reopen_mapping(request: Request, task_id: str, body: RevisionRequest):
+        return tasks().reopen_mapping(task_id, request.state.tenant_id, request.state.user_id, body.base_revision)
 
     @router.get("/workflow-tasks/{task_id}/maintenance")
     def maintenance(request: Request, task_id: str, offset: int = 0, limit: int = 30, search: str = "", issues_only: bool = False, sort: str = "", descending: bool = False):
@@ -161,9 +181,10 @@ def build_router(data_root: Path, database=None, task_queue=None) -> APIRouter:
         return tasks().apply_return(task_id, request.state.tenant_id, request.state.user_id, body.preview_id, body.delete_missing)
 
     @router.post("/workflow-tasks/{task_id}/exports", status_code=202)
-    def create_export(request: Request, background: BackgroundTasks, task_id: str, body: RevisionRequest,
+    def create_export(request: Request, background: BackgroundTasks, task_id: str, body: ExportRequest,
                       idempotency_key: str | None = Header(None, alias="Idempotency-Key")):
-        obj, created = tasks().create_export(task_id, request.state.tenant_id, body.base_revision, idempotency_key)
+        obj, created = tasks().create_export(task_id, request.state.tenant_id, body.base_revision,
+                                             idempotency=idempotency_key, output_template_id=body.output_template_id)
         if created:
             dispatch(background, "export", obj["id"], request.state.tenant_id)
         return obj
@@ -207,6 +228,10 @@ def build_router(data_root: Path, database=None, task_queue=None) -> APIRouter:
     def list_templates(request: Request):
         return templates().list(request.state.tenant_id)
 
+    @router.delete("/workflow-templates", dependencies=[Depends(require_admin)])
+    def delete_templates(request: Request, body: DeleteTemplates):
+        return templates().delete(request.state.tenant_id, body.ids)
+
     @router.post("/workflow-templates", dependencies=[Depends(require_admin)], status_code=201)
     def create_template(request: Request, body: NewTemplate):
         return templates().create(request.state.tenant_id, body.source_id, body.name)
@@ -214,6 +239,24 @@ def build_router(data_root: Path, database=None, task_queue=None) -> APIRouter:
     @router.post("/workflow-templates/import", dependencies=[Depends(require_admin)], status_code=202)
     async def import_template(request: Request, background: BackgroundTasks, excel_file: UploadFile = File(...), name: str = Form("新商品模板"), purpose: str = Form("output")):
         obj = templates().upload(request.state.tenant_id, name[:100], await read_upload(excel_file), purpose)
+        dispatch(background, "parse_template", obj["id"], request.state.tenant_id)
+        return obj
+
+    @router.post("/workflow-templates/{template_id}/sources", dependencies=[Depends(require_admin)], status_code=202)
+    async def attach_template_source(request: Request, background: BackgroundTasks, template_id: str, excel_file: UploadFile = File(...), purpose: str = Form(...)):
+        obj = templates().attach_source(template_id, request.state.tenant_id, await read_upload(excel_file), purpose)
+        dispatch(background, "parse_template", obj["id"], request.state.tenant_id)
+        return obj
+
+    @router.post("/workflow-templates/{template_id}/retry", dependencies=[Depends(require_admin)], status_code=202)
+    def retry_template(request: Request, background: BackgroundTasks, template_id: str, body: RevisionRequest):
+        obj = templates().retry(template_id, request.state.tenant_id, body.base_revision)
+        dispatch(background, "parse_template", obj["id"], request.state.tenant_id)
+        return obj
+
+    @router.post("/workflow-templates/{template_id}/reparse", dependencies=[Depends(require_admin)], status_code=202)
+    def reparse_template(request: Request, background: BackgroundTasks, template_id: str, body: RevisionRequest):
+        obj = templates().reparse(template_id, request.state.tenant_id, body.base_revision)
         dispatch(background, "parse_template", obj["id"], request.state.tenant_id)
         return obj
 

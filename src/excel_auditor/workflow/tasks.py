@@ -9,7 +9,7 @@ from pathlib import Path
 from sqlalchemy import delete, func, insert, select, update
 
 from .excel import MAX_ROWS, cell_text, discover, literal, read_maintenance, transform, validate_records, write_maintenance, write_output
-from .models import ColumnRule, EditRequest, MaintenanceField, MappingRequest, WorkflowConfig, WorkflowError, content_hash
+from .models import EditRequest, MappingRequest, WorkflowConfig, WorkflowError, content_hash
 from .repository import WorkflowStore, identifier, now, objects, records, revisions
 
 
@@ -71,11 +71,33 @@ class TaskService:
                             "updated_at": item["updated_at"], "error": payload.get("error", "")})
         return {"items": summary, "total": len(items)}
 
+    def delete(self, tenant: str, task_ids: list[str]):
+        unique_ids = list(dict.fromkeys(task_ids))
+        if len(unique_ids) != len(task_ids):
+            raise WorkflowError("删除列表包含重复处理记录，请刷新后重试。")
+        with self.store.engine.begin() as con:
+            tasks = [self.store.get(con, task_id, tenant, "task") for task_id in unique_ids]
+            processing = [item["payload"].get("name", item["id"]) for item in tasks if item["status"] == "processing"]
+            if processing:
+                raise WorkflowError(f"以下处理记录仍在导入，完成后再删除：{'、'.join(processing)}", 409)
+            related = [dict(row) for row in con.execute(select(objects).where(
+                objects.c.tenant_id == tenant, objects.c.kind.in_(["export", "return"])
+            )).mappings() if dict(row)["payload"].get("task_id") in unique_ids]
+            related_ids = [item["id"] for item in related]
+            con.execute(delete(records).where(records.c.task_id.in_(unique_ids)))
+            con.execute(delete(revisions).where(revisions.c.task_id.in_(unique_ids)))
+            if related_ids:
+                con.execute(delete(objects).where(objects.c.id.in_(related_ids), objects.c.tenant_id == tenant))
+            con.execute(delete(objects).where(objects.c.id.in_(unique_ids), objects.c.tenant_id == tenant, objects.c.kind == "task"))
+        for object_id in [*unique_ids, *related_ids]:
+            shutil.rmtree(self.store.root / "files" / object_id, ignore_errors=True)
+        return {"deleted": unique_ids}
+
     def create(self, tenant: str, actor: str, template_id: str, name: str, filename: str, content: bytes, idempotency: str | None = None):
         with self.store.engine.begin() as con:
             template = self.store.get(con, template_id, tenant, "template")
             if template["status"] != "published":
-                raise WorkflowError("请先试运行并发布模板。")
+                raise WorkflowError("请先发布模板。")
             config = WorkflowConfig.model_validate(template["payload"]["config"])
             fingerprint = hashlib.sha256(content + template_id.encode() + name.encode()).hexdigest()
             if idempotency:
@@ -157,24 +179,12 @@ class TaskService:
                 used = {column for binding in bindings for column in binding.columns}
                 if used & set(mapping.ignored_columns):
                     raise WorkflowError("已映射列不能同时忽略。")
-                extras = {}
                 for col in range(1, count + 1):
                     if col in used:
                         continue
                     title = source["columns"][col - 1]["header"]
-                    if col in mapping.ignored_columns or not config.preserve_extras:
-                        ignored.append({"sheet": mapping.sheet, "column": title, "reason": "按配置不导入"})
-                        continue
-                    key = "extra_" + hashlib.sha256(f"{mapping.sheet}:{col}:{title}".encode()).hexdigest()[:12]
-                    if key not in fields:
-                        title = f"扩展/{mapping.sheet}/{title}"
-                        taken = {field.rule.title for field in fields.values()}
-                        if title in taken:
-                            title += f" ({col})"
-                        field = MaintenanceField(rule=ColumnRule(name=key, title=title[:255]))
-                        config.fields.append(field)
-                        fields[key] = field
-                    extras[key] = col
+                    reason = "用户忽略" if col in mapping.ignored_columns else "未包含于模板字段"
+                    ignored.append({"sheet": mapping.sheet, "column": title, "reason": reason})
                 start = mapping.header_row + mapping.header_depth - 1
                 if start >= len(source["rows"]):
                     raise WorkflowError(f"{mapping.sheet} 数据起始位置之后没有记录。")
@@ -189,8 +199,6 @@ class TaskService:
                             values[binding.field] = transform(picked, binding.operation, binding.argument, binding.part)
                         except WorkflowError as exc:
                             raise WorkflowError(f"{mapping.sheet} 第 {row_number} 行：{exc}") from exc
-                    for key, col in extras.items():
-                        values[key] = raw_values[col - 1] if col <= len(raw_values) else ""
                     new_records.append({"task_id": task_id, "id": identifier("row"), "ordinal": len(new_records) + 1,
                                         "values_json": values, "original": dict(values),
                                         "source": {"sheet": mapping.sheet, "row": row_number}, "issues": [], "search_text": "", "issue_count": 0})
@@ -207,6 +215,19 @@ class TaskService:
             task["status"] = "maintenance" if errors else "ready"
             self.store.save(con, task)
             self.store.audit(con, task, actor, {"action": "import", "records": len(new_records)})
+        return self.get(task_id, tenant)
+
+    def reopen_mapping(self, task_id: str, tenant: str, actor: str, base_revision: int):
+        """Return a task to field confirmation so its maintenance rows can be rebuilt."""
+        with self.store.engine.begin() as con:
+            task = self.store.claim(con, task_id, tenant, base_revision)
+            if task["status"] not in {"maintenance", "ready", "completed"}:
+                raise WorkflowError("当前任务不能重新确认字段。", 409)
+            con.execute(delete(records).where(records.c.task_id == task_id))
+            task["payload"].update(record_count=0, error_count=0, warning_count=0, stage="mapping")
+            task["status"] = "mapping"
+            self.store.save(con, task)
+            self.store.audit(con, task, actor, {"action": "reopen_mapping"})
         return self.get(task_id, tenant)
 
     def rows(self, task_id: str, tenant: str, offset: int, limit: int, search: str = "", issues_only: bool = False, sort: str = "", descending: bool = False):
@@ -363,14 +384,60 @@ class TaskService:
             self.store.save(con, preview)
         return result
 
-    def create_export(self, task_id: str, tenant: str, base_revision: int, idempotency: str | None = None):
+    @staticmethod
+    def _output_config(maintenance: WorkflowConfig, output: WorkflowConfig) -> WorkflowConfig:
+        """Apply an output template to a task without changing its maintenance schema."""
+        from ..product_workflow.fixed_template import normalize_header
+
+        def names(field) -> set[str]:
+            return {normalize_header(value) for value in [field.rule.title, *field.rule.aliases] if value}
+
+        maintenance_fields = {field.rule.name: field for field in maintenance.fields}
+        output_fields = {field.rule.name: field for field in output.fields}
+        references = {
+            reference
+            for file in output.outputs
+            for sheet in file.sheets
+            for reference in [sheet.group_by, *sheet.sku_fields,
+                              *(column.field for column in sheet.columns),
+                              *(source for column in sheet.columns for source in column.sources)]
+            if reference
+        }
+        field_map: dict[str, str] = {}
+        for reference in references:
+            source = output_fields.get(reference)
+            if source is None:
+                raise WorkflowError("最终输出模板包含不存在的字段，请重新发布该模板。")
+            matched = [field.rule.name for field in maintenance_fields.values() if names(source) & names(field)]
+            if not matched:
+                raise WorkflowError(f"最终输出模板字段“{source.rule.title}”未在当前维护表中找到同名字段。")
+            if len(matched) > 1:
+                raise WorkflowError(f"最终输出模板字段“{source.rule.title}”匹配到多个维护字段，请调整字段名称或别名。")
+            field_map[reference] = matched[0]
+
+        result = maintenance.model_dump(mode="json")
+        outputs = output.model_dump(mode="json")["outputs"]
+        for file in outputs:
+            for sheet in file["sheets"]:
+                sheet["group_by"] = field_map.get(sheet["group_by"], sheet["group_by"])
+                sheet["sku_fields"] = [field_map.get(field, field) for field in sheet["sku_fields"]]
+                for column in sheet["columns"]:
+                    column["field"] = field_map.get(column["field"], column["field"])
+                    column["sources"] = [field_map.get(field, field) for field in column["sources"]]
+        result["outputs"] = outputs
+        return WorkflowConfig.model_validate(result)
+
+    def create_export(self, task_id: str, tenant: str, base_revision: int, idempotency: str | None = None,
+                      output_template_id: str | None = None):
         with self.store.engine.begin() as con:
             task = self.store.get(con, task_id, tenant, "task")
+            output_template_id = output_template_id or task["payload"]["template_id"]
             if idempotency:
                 run_id = "export_" + hashlib.sha256(f"{tenant}:{task_id}:{idempotency}".encode()).hexdigest()[:32]
                 previous = con.execute(select(objects).where(objects.c.id == run_id)).mappings().first()
                 if previous:
-                    if previous["payload"]["revision"] != base_revision:
+                    if (previous["payload"]["revision"] != base_revision
+                            or previous["payload"].get("output_template_id") != output_template_id):
                         raise WorkflowError("重复生成请求的版本不一致。", 409)
                     return self.store.public(dict(previous)), False
             else:
@@ -388,11 +455,19 @@ class TaskService:
             errors, _ = validate_records(rows, config)
             if errors:
                 raise WorkflowError("维护数据未通过生成前校验。")
+            output_template = self.store.get(con, output_template_id, tenant, "template")
+            if output_template["status"] != "published":
+                raise WorkflowError("请选择已发布的最终输出模板。")
+            output_config = WorkflowConfig.model_validate(output_template["payload"]["config"])
+            config = self._output_config(config, output_config)
             output_fields = {col.field for file in config.outputs for sheet in file.sheets for col in sheet.columns}
             output_fields.update(name for file in config.outputs for sheet in file.sheets for col in sheet.columns for name in col.sources)
             run = self.store.create(con, tenant, "export", {
-                "task_id": task_id, "revision": base_revision, "template_id": task["payload"]["template_id"],
-                "template_hash": task["payload"]["template_hash"], "config": config.model_dump(mode="json"),
+                "task_id": task_id, "revision": base_revision, "template_id": output_template_id,
+                "maintenance_template_id": task["payload"]["template_id"],
+                "output_template_id": output_template_id,
+                "output_template_version": output_template["payload"].get("version", 1),
+                "template_hash": content_hash(config.model_dump(mode="json")), "config": config.model_dump(mode="json"),
                 "record_count": len(rows), "omitted_fields": [field.rule.title for field in config.fields if field.rule.name not in output_fields],
             }, "processing", run_id)
             write_json(self.store.directory(run_id) / "snapshot.json", rows)
