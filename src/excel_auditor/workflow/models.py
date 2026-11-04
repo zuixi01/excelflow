@@ -4,7 +4,7 @@ import hashlib
 import json
 import re
 from decimal import Decimal
-from typing import Any, Literal
+from typing import Any, Literal, Annotated
 
 from pydantic import Field, model_validator
 
@@ -19,18 +19,54 @@ class WorkflowError(ValueError):
         self.code = code
 
 
+class SourceColumn(StrictModel):
+    sheet: str
+    column: int = Field(ge=1, le=200)
+    header: str
+    context_only: bool = False
+
+
 class MaintenanceField(StrictModel):
     rule: ColumnRule
     editable: bool = True
     default: str | None = None
+    category_id: str = ""
+    description: str = ""
+    hidden: bool = False
+    source_column: SourceColumn | None = None
+    output_kind: Literal["", "normal", "attribute", "specification"] = ""
+    header_path: list[str] | None = Field(default=None, min_length=1, max_length=50)
+    maintenance_width: float | None = Field(default=None, ge=0, le=255)
+
+
+class ReturnColumnChoice(StrictModel):
+    key: str
+    action: Literal['existing', 'new', 'ignore']
+    field_id: str = ''
+    title: str = Field(default='', max_length=255)
+    kind: Literal['normal', 'attribute', 'specification'] = 'normal'
+    type: Literal['string', 'id_code', 'integer', 'decimal', 'boolean', 'date', 'datetime'] = 'string'
+
+
+class ReturnRowChoice(StrictModel):
+    key: str
+    action: Literal['existing', 'new', 'ignore']
+    record_id: str = ''
+
+
+class FlexibleReturnRequest(StrictModel):
+    columns: list[ReturnColumnChoice] = Field(max_length=10200)
+    rows: list[ReturnRowChoice] = Field(default_factory=list, max_length=20000)
+    missing_fields: dict[str, Literal['preserve', 'delete']] = Field(default_factory=dict, max_length=10200)
 
 
 class OutputColumn(StrictModel):
     title: str = Field(min_length=1, max_length=255)
     field: str = ""
-    operation: Literal["copy", "constant", "multiply", "concat", "split", "formula"] = "copy"
+    operation: Literal["copy", "constant", "multiply", "concat", "split", "formula", "key_value"] = "copy"
     argument: str = Field(default="", max_length=1024)
-    sources: list[str] = Field(default_factory=list, max_length=20)
+    sources: list[str] = Field(default_factory=list, max_length=200)
+    source_labels: list[str] = Field(default_factory=list, max_length=200)
     part: int = Field(default=0, ge=0, le=50)
     required: bool = False
     number_format: str = Field(default="", max_length=255)
@@ -38,6 +74,11 @@ class OutputColumn(StrictModel):
 
     @model_validator(mode="after")
     def safe_operation(self):
+        if self.operation == "key_value":
+            if not self.sources or len(self.sources) != len(self.source_labels) or any(not label.strip() for label in self.source_labels):
+                raise ValueError("键值输出需要一一对应的源字段与字段名称")
+        elif len(self.sources) > 20:
+            raise ValueError("普通输出转换最多引用 20 个源字段")
         if self.operation == "multiply":
             try:
                 factor = Decimal(self.argument)
@@ -62,10 +103,12 @@ class OutputSheet(StrictModel):
     name: str = Field(default="商品导入", min_length=1, max_length=31)
     header_row: int = Field(default=1, ge=1, le=50)
     data_start_row: int = Field(default=2, ge=2, le=100)
-    columns: list[OutputColumn] = Field(min_length=1, max_length=200)
+    columns: list[OutputColumn] = Field(min_length=1, max_length=10200)
     group_by: str = ""
     sku_fields: list[str] = Field(default_factory=list, max_length=5)
     sku_separator: str = Field(default="|", min_length=1, max_length=5)
+    filter_field: str = ""
+    filter_value: str = ""
 
     @model_validator(mode="after")
     def layout(self):
@@ -110,15 +153,23 @@ class ImportRule(StrictModel):
 class WorkflowConfig(StrictModel):
     name: str = Field(min_length=1, max_length=100)
     description: str = Field(default="", max_length=1000)
-    fields: list[MaintenanceField] = Field(min_length=1, max_length=200)
+    fields: list[MaintenanceField] = Field(min_length=1, max_length=10200)
     import_rules: list[ImportRule] = Field(default_factory=list, max_length=200)
     unique_key: list[str] = Field(default_factory=list, max_length=10)
     cross_checks: list[CrossCheck] = Field(default_factory=list, max_length=30)
     outputs: list[OutputFile] = Field(min_length=1, max_length=10)
     preserve_extras: bool = False
+    source_retention_version: int = Field(default=0, ge=0, le=2)
+    source_header_layout: Literal["provenance", "compact", "grouped"] = "provenance"
+    preserve_source_merges: bool = False
+    exclude_source_sequence: bool = False
+    category_field: str = ""
+    maintenance_header_heights: list[Annotated[float, Field(ge=0, le=409)] | None] = Field(default_factory=list, max_length=50)
 
     @model_validator(mode="after")
     def references(self):
+        if sum(field.source_column is None for field in self.fields) > 200:
+            raise ValueError("固定字段与动态字段合计最多 200 个；原表保留列单独计数")
         ids = [item.rule.name for item in self.fields]
         if len(set(ids)) != len(ids) or len({item.rule.title for item in self.fields}) != len(ids):
             raise ValueError("维护字段 ID 和显示名必须唯一")
@@ -136,7 +187,7 @@ class WorkflowConfig(StrictModel):
                 raise ValueError("此导入转换需要一个来源表头")
             if rule.operation in {"multiply", "split"}:
                 OutputColumn(title="import", operation=rule.operation, argument=rule.argument)
-        if set(self.unique_key) - known:
+        if (set(self.unique_key) | ({self.category_field} if self.category_field else set())) - known:
             raise ValueError("唯一键引用了不存在的字段")
         field_types = {field.rule.name: field.rule.type.value for field in self.fields}
         for check in self.cross_checks:
@@ -149,12 +200,12 @@ class WorkflowConfig(StrictModel):
             raise ValueError("输出文件名不能重复")
         for file in self.outputs:
             for sheet in file.sheets:
-                refs = {sheet.group_by, *sheet.sku_fields}
+                refs = {sheet.group_by, sheet.filter_field, *sheet.sku_fields}
                 for column in sheet.columns:
                     refs.update(column.sources)
                     if column.operation not in {"constant", "formula"}:
                         refs.add(column.field)
-                        if not column.field and column.operation != "concat":
+                        if not column.field and column.operation not in {"concat", "key_value"}:
                             raise ValueError(f"输出字段 {column.title} 尚未关联维护字段")
                     if column.operation == "concat" and not column.sources:
                         raise ValueError("拼接规则至少需要一个源字段")
@@ -177,6 +228,9 @@ class Binding(StrictModel):
     operation: Literal["copy", "trim", "multiply", "concat", "split", "constant"] = "copy"
     argument: str = Field(default="", max_length=1024)
     part: int = Field(default=0, ge=0, le=50)
+    method: str = "manual"
+    reason: str = Field(default="", max_length=500)
+    confidence: float | None = Field(default=None, ge=0, le=1)
 
     @model_validator(mode="after")
     def valid_columns(self):
@@ -200,6 +254,7 @@ class SheetMapping(StrictModel):
     include: bool = True
     bindings: list[Binding] = Field(default_factory=list, max_length=200)
     ignored_columns: list[int] = Field(default_factory=list, max_length=200)
+    category_id: str = "unclassified"
 
 
 class MappingRequest(StrictModel):

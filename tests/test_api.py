@@ -170,6 +170,32 @@ def test_bearer_auth_can_be_required(tmp_path, monkeypatch):
     assert authorized.status_code == 404
 
 
+def test_auth_session_validates_bearer_token_without_caching_identity(tmp_path, monkeypatch):
+    monkeypatch.setenv("EXCEL_AUDITOR_DATA", str(tmp_path / "session-data"))
+    monkeypatch.delenv("EXCEL_AUDITOR_API_TOKEN", raising=False)
+    monkeypatch.setenv("EXCEL_AUDITOR_API_TOKENS_JSON", json.dumps({
+        "session-token": {"tenant_id": "tenant-session", "user_id": "operator-session"},
+    }))
+    import importlib
+    import excel_auditor.api as api_module
+
+    api_module = importlib.reload(api_module)
+    client = TestClient(api_module.app)
+
+    assert client.get("/api/v1/auth/session").status_code == 401
+    response = client.get("/api/v1/auth/session", headers={"Authorization": "Bearer session-token"})
+
+    assert response.status_code == 200, response.text
+    assert response.json() | {
+        "authenticated": True,
+        "auth_required": True,
+        "tenant_id": "tenant-session",
+        "user_id": "operator-session",
+    } == response.json()
+    assert response.headers["cache-control"] == "no-store"
+    assert response.headers["pragma"] == "no-cache"
+
+
 def test_precheck_uses_rule_specific_upload_limit(tmp_path, monkeypatch):
     monkeypatch.setenv("EXCEL_AUDITOR_DATA", str(tmp_path / "precheck-limit"))
     import importlib

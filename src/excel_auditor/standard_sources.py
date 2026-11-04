@@ -9,13 +9,83 @@ from typing import Any, Callable, Sequence
 from urllib.parse import urljoin, urlparse
 
 import httpx
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from .models import StandardSourceConfig
 from .observability import metrics
 from .snapshots import SpilledRecords
 from .source_paths import validate_managed_http_path
 from .strict_serialization import load_json_strict
+
+
+class FieldReconciliationConnectionConfig(BaseModel):
+    """A platform-controlled endpoint that returns a field contract and standard records."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    path: str
+    method: str = "GET"
+    parameter_mapping: dict[str, str] = Field(default_factory=dict)
+    static_parameters: dict[str, Any] = Field(default_factory=dict)
+    title: str = Field(default="平台字段标准", min_length=1, max_length=100)
+    tenant_ids: list[str] = Field(default_factory=lambda: ["local", "default"], min_length=1)
+
+    @field_validator("path")
+    @classmethod
+    def valid_path(cls, value: str) -> str:
+        return validate_managed_http_path(value, field_name="field_reconciliation.path")
+
+    @field_validator("method")
+    @classmethod
+    def valid_method(cls, value: str) -> str:
+        if value not in {"GET", "POST"}:
+            raise ValueError("field_reconciliation.method must be GET or POST")
+        return value
+
+    @model_validator(mode="after")
+    def valid_parameters(self) -> "FieldReconciliationConnectionConfig":
+        from .source_paths import validate_parameter_name
+
+        for name in self.static_parameters:
+            validate_parameter_name(str(name), field_name="field_reconciliation.static_parameters key")
+        for request_name, task_name in self.parameter_mapping.items():
+            validate_parameter_name(str(request_name), field_name="field_reconciliation.parameter_mapping request name")
+            validate_parameter_name(str(task_name), field_name="field_reconciliation.parameter_mapping task name")
+        overlap = set(self.static_parameters) & set(self.parameter_mapping)
+        if overlap:
+            raise ValueError(f"field reconciliation parameters overlap: {sorted(overlap)}")
+        return self
+
+
+class FieldDefinitionConnectionConfig(BaseModel):
+    """Managed endpoint supplying categories with attributes and specifications."""
+
+    model_config = ConfigDict(extra="forbid")
+    title: str = Field(default="商品字段平台", min_length=1, max_length=100)
+    path: str
+    method: str = "GET"
+    tenant_ids: list[str] = Field(default_factory=lambda: ["local", "default"], min_length=1)
+    static_parameters: dict[str, Any] = Field(default_factory=dict, max_length=20)
+
+    @field_validator("path")
+    @classmethod
+    def valid_path(cls, value: str) -> str:
+        return validate_managed_http_path(value, field_name="field_definition.path")
+
+    @field_validator("method")
+    @classmethod
+    def valid_method(cls, value: str) -> str:
+        if value not in {"GET", "POST"}:
+            raise ValueError("field_definition.method must be GET or POST")
+        return value
+
+    @field_validator("static_parameters")
+    @classmethod
+    def valid_parameters(cls, values: dict[str, Any]) -> dict[str, Any]:
+        from .source_paths import validate_parameter_name
+        for key in values:
+            validate_parameter_name(key, field_name="field_definition.static_parameters key")
+        return values
 
 
 class ManagedConnection(BaseModel):
@@ -32,6 +102,8 @@ class ManagedConnection(BaseModel):
     max_records: int = Field(default=500_000, ge=1, le=1_000_000)
     allow_private_network: bool = False
     allow_insecure_http: bool = False
+    field_reconciliation: FieldReconciliationConnectionConfig | None = None
+    field_definition: FieldDefinitionConnectionConfig | None = None
 
     @field_validator("base_url")
     @classmethod
@@ -138,6 +210,73 @@ class ManagedHttpSource:
     def fetch(self, config: StandardSourceConfig, parameters: dict[str, Any] | None = None) -> Sequence[dict[str, Any]] | dict[str, list[dict[str, Any]]]:
         records, _metadata = self.fetch_with_metadata(config, parameters)
         return records
+
+    def fetch_object(
+        self,
+        connection_id: str,
+        path: str,
+        method: str,
+        *,
+        static_parameters: dict[str, Any] | None = None,
+        parameter_mapping: dict[str, str] | None = None,
+        parameters: dict[str, Any] | None = None,
+        auth_secret_override: str | None = None,
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
+        """Fetch one JSON object through the same allowlist and SSRF controls as standard data."""
+        if method not in {"GET", "POST"}:
+            raise ValueError("unsupported platform HTTP method")
+        connection = self.registry.get(connection_id)
+        resolved_addresses = _validate_target(connection, path, self.resolver)
+        headers = {"Accept": "application/json"}
+        if auth_secret_override is not None:
+            if '\r' in auth_secret_override or '\n' in auth_secret_override:
+                raise ValueError('unsafe authentication secret')
+            if auth_secret_override:
+                headers[connection.auth_header] = connection.auth_prefix + auth_secret_override
+        elif connection.auth_secret_ref:
+            headers[connection.auth_header] = connection.auth_prefix + _load_secret(connection.auth_secret_ref)
+        url = urljoin(connection.base_url, path.lstrip("/"))
+        request_url = url
+        sni_hostname: str | None = None
+        if self.transport is None:
+            parsed_url = urlparse(url)
+            address = resolved_addresses[0]
+            host = f"[{address}]" if ":" in address else address
+            if parsed_url.port:
+                host += f":{parsed_url.port}"
+            request_url = parsed_url._replace(netloc=host).geturl()
+            original_host = parsed_url.hostname or ""
+            default_port = 443 if parsed_url.scheme == "https" else 80
+            headers["Host"] = original_host if parsed_url.port in {None, default_port} else f"{original_host}:{parsed_url.port}"
+            sni_hostname = original_host if parsed_url.scheme == "https" else None
+        request_parameters = dict(static_parameters or {})
+        supplied = parameters or {}
+        for request_name, task_name in (parameter_mapping or {}).items():
+            if task_name not in supplied:
+                raise ValueError(f"FIELD_SOURCE_FAILED: required task parameter is missing: {task_name}")
+            request_parameters[request_name] = supplied[task_name]
+        started = time.perf_counter()
+        with httpx.Client(timeout=connection.timeout_seconds, headers=headers, follow_redirects=False, transport=self.transport) as client:
+            response, retries = _request(client, method, request_url, request_parameters, connection.max_response_bytes, sni_hostname)
+        elapsed_ms = int((time.perf_counter() - started) * 1000)
+        metrics.increment("standard_http_requests_total", status=response.status_code, connection_id=connection_id)
+        metrics.increment("standard_http_retries_total", amount=retries, connection_id=connection_id)
+        content_type = response.headers.get("content-type", "").split(";", 1)[0].strip().lower()
+        if content_type not in {"application/json", "application/problem+json"}:
+            raise ValueError("FIELD_SOURCE_FAILED: response is not JSON")
+        if len(response.content) > connection.max_response_bytes:
+            raise ValueError("FIELD_SOURCE_FAILED: response exceeds configured size")
+        payload = _strict_json_loads(response.content)
+        if not isinstance(payload, dict):
+            raise ValueError("FIELD_SOURCE_FAILED: response root must be an object")
+        return payload, {
+            "connection_id": connection_id,
+            "request_path": path,
+            "method": method,
+            "response_bytes": len(response.content),
+            "elapsed_ms": elapsed_ms,
+            "retries": retries,
+        }
 
     def fetch_with_metadata(self, config: StandardSourceConfig, parameters: dict[str, Any] | None = None) -> tuple[Sequence[dict[str, Any]] | dict[str, list[dict[str, Any]]], dict[str, Any]]:
         if config.type != "managed_http" or not config.connection_id or not config.path:

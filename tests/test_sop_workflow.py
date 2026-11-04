@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib
 import json
+import re
 from concurrent.futures import ThreadPoolExecutor
 from io import BytesIO
 from pathlib import Path
@@ -20,7 +21,7 @@ from excel_auditor.workflow.ai import AIClient, AISettings
 from excel_auditor.workflow.excel import discover, safe_book, write_output
 from excel_auditor.workflow.models import EditRequest, MappingRequest, OutputColumn, TemplateEdit, WorkflowConfig, WorkflowError, default_config
 from excel_auditor.workflow.repository import WorkflowStore, objects, records, revisions
-from excel_auditor.workflow.tasks import TaskService
+from excel_auditor.workflow.tasks import TaskService, maintenance_download_name
 from excel_auditor.workflow.templates import TemplateService
 
 
@@ -68,6 +69,39 @@ def ready_task(runtime, **kwargs):
     task = create_task(runtime, **kwargs)
     assert task["status"] == "mapping", task
     return runtime[1].confirm_mapping(task["id"], kwargs.get("tenant", "local"), "local", mapping(task))
+
+
+@pytest.mark.parametrize("operation", ["mapping", "edit", "export"])
+def test_validation_does_not_hold_database_write_lock(runtime, monkeypatch, operation):
+    import threading
+    import excel_auditor.workflow.tasks as module
+    store, service, _ = runtime
+    task = create_task(runtime) if operation == "mapping" else ready_task(runtime)
+    entered, release = threading.Event(), threading.Event()
+    validate = module.validate_records
+
+    def slow_validation(*args):
+        entered.set()
+        assert release.wait(5)
+        return validate(*args)
+
+    monkeypatch.setattr(module, "validate_records", slow_validation)
+    def work():
+        if operation == "mapping":
+            return service.confirm_mapping(task["id"], "local", "local", mapping(task))
+        if operation == "edit":
+            return service.edit(task["id"], "local", "local", EditRequest(base_revision=task["revision"]))
+        return service.create_export(task["id"], "local", task["revision"])
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        future = pool.submit(work)
+        try:
+            assert entered.wait(5)
+            unrelated = pool.submit(TemplateService(store).create, "local", name="independent")
+            assert unrelated.result(timeout=1)["id"]
+        finally:
+            release.set()
+        future.result(timeout=5)
 
 
 def test_maintenance_persists_exact_text_and_cannot_overwrite_new_revision(runtime):
@@ -181,6 +215,114 @@ def test_roundtrip_sort_add_and_missing_rows_default_to_preservation(runtime):
     assert service.rows(task["id"], "local", 0, 20)["items"][1]["values_json"]["sale_price"] == "219.00"
     with pytest.raises(WorkflowError):
         service.apply_return(task["id"], "local", "local", preview["id"], False)
+
+
+def test_maintenance_download_timestamp_and_same_second_snapshots_are_isolated(runtime, monkeypatch):
+    from datetime import datetime, timezone
+    import excel_auditor.workflow.tasks as task_module
+    class FixedTime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return datetime(2026, 11, 3, 7, 30, 25, tzinfo=timezone.utc).astimezone(tz)
+    monkeypatch.setattr(task_module, 'datetime', FixedTime)
+    _, service, _ = runtime
+    task = ready_task(runtime)
+    first = service.maintenance_file(task["id"], "local")
+    assert maintenance_download_name(first) == '测试整理_维护表_20261103153025.xlsx'
+    row = service.rows(task["id"], "local", 0, 20)["items"][0]
+    service.edit(task["id"], "local", "local", EditRequest(base_revision=1, changes={row["id"]: {"stock": "10"}}))
+    latest = service.maintenance_file(task["id"], "local")
+    assert maintenance_download_name(latest) == maintenance_download_name(first)
+    assert latest != first and first.exists() and latest.exists()
+    book = load_workbook(latest)
+    meta = {row[0]: row[1] for row in book["_workflow_meta"].values if row[0]}
+    book.close()
+    assert meta["revision"] == 2
+    with pytest.raises(WorkflowError, match="过期"):
+        service.preview_return(task["id"], "local", first.read_bytes())
+    preview = service.preview_return(task["id"], "local", latest.read_bytes())
+    assert preview["payload"]["counts"]["changed"] == 0
+
+
+@pytest.mark.parametrize("name", ['供应商/报价:10?*', '..\\供应商\x01报价', ' . '])
+def test_maintenance_download_sanitizes_user_title_without_escaping_task_directory(runtime, name):
+    store, service, _ = runtime
+    task = ready_task(runtime)
+    with store.engine.begin() as con:
+        stored = store.get(con, task["id"], "local")
+        stored["payload"]["name"] = name
+        store.save(con, stored)
+    path = service.maintenance_file(task["id"], "local")
+    assert path.parent == store.root / "files" / task["id"]
+    assert not any(char in path.name for char in '<>:"/\\|?*\x01')
+    assert re.search(r'_维护表_\d{14}\.xlsx$', maintenance_download_name(path))
+
+
+def test_return_api_rejects_old_file_then_accepts_the_latest_download(runtime, tmp_path):
+    from fastapi import FastAPI, Request
+    from fastapi.responses import JSONResponse
+    from urllib.parse import unquote
+    from excel_auditor.workflow.routes import build_router
+
+    _, service, _ = runtime
+    task = ready_task(runtime)
+    app = FastAPI()
+
+    @app.middleware("http")
+    async def identity(request: Request, call_next):
+        request.state.tenant_id = request.state.user_id = "local"
+        return await call_next(request)
+
+    @app.exception_handler(WorkflowError)
+    async def errors(request, exc):
+        return JSONResponse({"detail": str(exc), "code": exc.code}, status_code=exc.status)
+
+    app.include_router(build_router(tmp_path, inline_executor_for_tests=True))
+    root = f"/api/v1/workflow-tasks/{task['id']}"
+    with TestClient(app) as client:
+        first = client.get(root + '/maintenance/download')
+        book = load_workbook(BytesIO(first.content))
+        sheet = book['维护表']
+        stock_column = next(index + 2 for index, field in enumerate(task['payload']['config']['fields']) if field['rule']['name'] == 'stock')
+        first_data_row = dict(book['_workflow_meta'].values)['header_depth'] + 1
+        sheet.cell(first_data_row, stock_column, '123')
+        edited = BytesIO()
+        book.save(edited)
+        book.close()
+        preview = client.post(root + '/maintenance/returns', files={'excel_file': ('edited.xlsx', edited.getvalue())})
+        assert preview.status_code == 200, preview.text
+        assert preview.json()['payload']['counts']['changed'] == 1
+        applied = client.post(root + '/maintenance/returns/apply', json={'preview_id': preview.json()['id']})
+        assert applied.status_code == 200 and applied.json()['revision'] == 2
+        rejected = client.post(root + '/maintenance/returns', files={'excel_file': ('old.xlsx', first.content)})
+        assert rejected.status_code == 409 and rejected.json()['code'] == 'REVISION_CONFLICT'
+        latest = client.get(root + '/maintenance/download')
+        assert re.search(r'_维护表_\d{14}\.xlsx', unquote(latest.headers['content-disposition']))
+        assert '_download_' not in unquote(latest.headers['content-disposition'])
+        assert latest.headers['cache-control'] == 'no-store'
+        preview = client.post(root + '/maintenance/returns', files={'excel_file': ('latest.xlsx', latest.content)})
+        assert preview.status_code == 200 and preview.json()['payload']['counts']['changed'] == 0
+        assert service.rows(task['id'], 'local', 0, 20)['items'][0]['values_json']['stock'] == '123'
+
+
+def test_return_upload_concurrent_edit_uses_the_version_conflict_recovery_code(runtime, monkeypatch):
+    import excel_auditor.workflow.tasks as task_module
+    _, service, _ = runtime
+    task = ready_task(runtime)
+    content = service.maintenance_file(task['id'], 'local').read_bytes()
+    row = service.rows(task['id'], 'local', 0, 20)['items'][0]
+    original_read = task_module.read_maintenance
+
+    def read_during_edit(path, snapshot, **kwargs):
+        incoming = original_read(path, snapshot, **kwargs)
+        service.edit(task['id'], 'local', 'local', EditRequest(base_revision=1, changes={row['id']: {'stock': '11'}}))
+        return incoming
+
+    monkeypatch.setattr(task_module, 'read_maintenance', read_during_edit)
+    with pytest.raises(WorkflowError) as caught:
+        service.preview_return(task['id'], 'local', content)
+    assert caught.value.status == 409 and caught.value.code == 'REVISION_CONFLICT'
+    assert service.rows(task['id'], 'local', 0, 20)['items'][0]['values_json']['stock'] == '11'
 
 
 def test_maintenance_download_restores_grouped_template_headers(runtime):
@@ -471,11 +613,24 @@ def test_source_formulas_and_non_xlsx_are_not_silently_converted(runtime, tmp_pa
 
 
 def test_api_full_sop_and_authorization(tmp_path, monkeypatch):
+    from sqlalchemy import select
+    from excel_auditor.workflow.execution import run_execution
+    from excel_auditor.workflow.repository import executions
+
     monkeypatch.setenv("EXCEL_AUDITOR_DATA", str(tmp_path / "api"))
     for key in ("DATABASE_URL", "REDIS_URL", "S3_BUCKET", "EXCEL_AUDITOR_API_TOKEN", "EXCEL_AUDITOR_API_TOKENS_JSON"):
         monkeypatch.delenv(key, raising=False)
     import excel_auditor.api as module
     module = importlib.reload(module)
+    store = WorkflowStore(tmp_path / 'api' / 'workflow')
+
+    def run_pending():
+        with store.engine.connect() as con:
+            ids = list(con.execute(select(executions.c.id).where(
+                executions.c.status == 'pending')).scalars())
+        for execution_id in ids:
+            run_execution(store.root, execution_id)
+
     with TestClient(module.app) as client:
         created_template = client.post("/api/v1/workflow-templates", json={"name": "API 流程"})
         assert created_template.status_code == 201, created_template.text
@@ -488,13 +643,25 @@ def test_api_full_sop_and_authorization(tmp_path, monkeypatch):
         created = client.post("/api/v1/workflow-tasks", data={"template_id": template["id"]}, files={"excel_file": ("sample.xlsx", workbook())})
         assert created.status_code == 202, created.text
         task_id = created.json()["id"]
+        run_pending()
         task = client.get(f"/api/v1/workflow-tasks/{task_id}").json()
         ready = client.post(f"/api/v1/workflow-tasks/{task_id}/mapping", json=mapping(task).model_dump())
-        assert ready.status_code == 200, ready.text
+        assert ready.status_code == 202, ready.text
+        run_pending()
+        assert client.get(ready.headers['Location']).json()['status'] == 'ready'
         downloaded = client.get(f"/api/v1/workflow-tasks/{task_id}/maintenance/download")
+        assert downloaded.status_code == 202
+        run_pending()
+        downloaded = client.get(downloaded.headers['Location'] + '/result')
         assert downloaded.status_code == 200 and downloaded.content[:2] == b"PK"
+        from urllib.parse import unquote
+        disposition = unquote(downloaded.headers["content-disposition"])
+        assert re.search(r'_维护表_\d{14}\.xlsx', disposition) and '_download_' not in disposition
+        assert downloaded.headers["cache-control"] == "no-store"
         created_export = client.post(f"/api/v1/workflow-tasks/{task_id}/exports", json={"base_revision": 1})
         assert created_export.status_code == 202, created_export.text
+        run_pending()
+        run_pending()
         exported = client.get(f"/api/v1/workflow-tasks/{task_id}").json()
         assert exported["exports"][0]["status"] == "completed"
         run = exported["exports"][0]
@@ -505,6 +672,7 @@ def test_api_full_sop_and_authorization(tmp_path, monkeypatch):
         assert preview_rows[header_depth][preview_rows[0].index("商品名称")] == "台灯"
         forbidden = client.post("/api/v1/workflow-templates", headers={"Origin": "https://evil.example"}, json={})
         assert forbidden.status_code == 403
+    store.engine.dispose()
 
 
 def test_trial_applies_import_transforms_and_clears_previous_success(runtime):

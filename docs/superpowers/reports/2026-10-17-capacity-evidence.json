@@ -1,0 +1,928 @@
+{
+  "date": "2026-10-17",
+  "scope": "Local synthetic workload acceptance; not production deployment or real-model capacity",
+  "current_benchmark_source_sha256": "81a14499060b047e156bd339e9ce0aa74b639be1905152ba6b677b96efc7208a",
+  "runs": [
+    {
+      "source": ".codex-artifacts/capacity-parent-index/report.json",
+      "sha256": "a9f2b1ccba6d1293f47394e017374d470c2d91831ae672c14e1abf374a0c97f7",
+      "completed": false,
+      "model": "synthetic HTTP, 100 ms/request; no production model or business files",
+      "platform": "Linux-6.18.33.2-microsoft-standard-WSL2-x86_64-with-glibc2.41",
+      "python": "3.12.14",
+      "cpu_logical": 12,
+      "host_memory_gb": 15.5,
+      "api_workers": 2,
+      "import_workers": 4,
+      "export_workers": 2,
+      "rq_worker_class": "rq.worker.Worker",
+      "cases": [
+        {
+          "tasks": 30,
+          "accounts": 1,
+          "cache": "cold",
+          "submit": {
+            "p50_seconds": 1.3356,
+            "p95_seconds": 1.5668
+          },
+          "query": {
+            "p50_seconds": 0.7039,
+            "p95_seconds": 1.0404
+          },
+          "save": {
+            "p50_seconds": 1.3835,
+            "p95_seconds": 1.7825
+          },
+          "queue": {
+            "p50_seconds": 7.6917,
+            "p95_seconds": 13.7737
+          },
+          "execution": {
+            "p50_seconds": 0.8668,
+            "p95_seconds": 1.3375
+          },
+          "end_to_end": {
+            "p50_seconds": 26.3378,
+            "p95_seconds": 35.5718
+          },
+          "batch_seconds": 35.59,
+          "tasks_per_minute": 50.58,
+          "model_calls": 1,
+          "model_429": 0,
+          "cross_account_access": 0,
+          "duplicate_results": 0
+        },
+        {
+          "tasks": 30,
+          "accounts": 1,
+          "cache": "warm",
+          "submit": {
+            "p50_seconds": 1.526,
+            "p95_seconds": 1.7727
+          },
+          "query": {
+            "p50_seconds": 0.9046,
+            "p95_seconds": 1.4935
+          },
+          "save": {
+            "p50_seconds": 1.3722,
+            "p95_seconds": 2.4601
+          },
+          "queue": {
+            "p50_seconds": 6.8638,
+            "p95_seconds": 16.4969
+          },
+          "execution": {
+            "p50_seconds": 0.9485,
+            "p95_seconds": 1.9673
+          },
+          "end_to_end": {
+            "p50_seconds": 25.3931,
+            "p95_seconds": 34.1918
+          },
+          "batch_seconds": 34.374,
+          "tasks_per_minute": 52.37,
+          "model_calls": 0,
+          "model_429": 0,
+          "cross_account_access": 0,
+          "duplicate_results": 0
+        },
+        {
+          "tasks": 30,
+          "accounts": 1,
+          "cache": "different_headers",
+          "submit": {
+            "p50_seconds": 1.7476,
+            "p95_seconds": 2.2551
+          },
+          "query": {
+            "p50_seconds": 0.7882,
+            "p95_seconds": 1.2093
+          },
+          "save": {
+            "p50_seconds": 1.2011,
+            "p95_seconds": 2.0037
+          },
+          "queue": {
+            "p50_seconds": 7.5009,
+            "p95_seconds": 16.9934
+          },
+          "execution": {
+            "p50_seconds": 1.1558,
+            "p95_seconds": 2.2756
+          },
+          "end_to_end": {
+            "p50_seconds": 26.5354,
+            "p95_seconds": 34.8625
+          },
+          "batch_seconds": 34.992,
+          "tasks_per_minute": 51.44,
+          "model_calls": 30,
+          "model_429": 0,
+          "cross_account_access": 0,
+          "duplicate_results": 0
+        },
+        {
+          "tasks": 30,
+          "accounts": 4,
+          "cache": "cold",
+          "submit": {
+            "p50_seconds": 1.3304,
+            "p95_seconds": 1.8832
+          },
+          "query": {
+            "p50_seconds": 0.7356,
+            "p95_seconds": 1.2167
+          },
+          "save": {
+            "p50_seconds": 1.2739,
+            "p95_seconds": 1.9575
+          },
+          "queue": {
+            "p50_seconds": 8.8625,
+            "p95_seconds": 14.2828
+          },
+          "execution": {
+            "p50_seconds": 0.9283,
+            "p95_seconds": 1.6167
+          },
+          "end_to_end": {
+            "p50_seconds": 25.5534,
+            "p95_seconds": 36.969
+          },
+          "batch_seconds": 36.993,
+          "tasks_per_minute": 48.66,
+          "model_calls": 1,
+          "model_429": 0,
+          "cross_account_access": 0,
+          "duplicate_results": 0
+        },
+        {
+          "tasks": 30,
+          "accounts": 4,
+          "cache": "warm",
+          "submit": {
+            "p50_seconds": 1.0248,
+            "p95_seconds": 1.1607
+          },
+          "query": {
+            "p50_seconds": 0.6773,
+            "p95_seconds": 1.4002
+          },
+          "save": {
+            "p50_seconds": 1.4182,
+            "p95_seconds": 2.2082
+          },
+          "queue": {
+            "p50_seconds": 8.5057,
+            "p95_seconds": 14.7505
+          },
+          "execution": {
+            "p50_seconds": 0.7932,
+            "p95_seconds": 1.9349
+          },
+          "end_to_end": {
+            "p50_seconds": 25.3068,
+            "p95_seconds": 33.2706
+          },
+          "batch_seconds": 33.616,
+          "tasks_per_minute": 53.55,
+          "model_calls": 0,
+          "model_429": 0,
+          "cross_account_access": 0,
+          "duplicate_results": 0
+        },
+        {
+          "tasks": 30,
+          "accounts": 4,
+          "cache": "different_headers",
+          "submit": {
+            "p50_seconds": 2.2636,
+            "p95_seconds": 3.3024
+          },
+          "query": {
+            "p50_seconds": 0.8381,
+            "p95_seconds": 1.4457
+          },
+          "save": {
+            "p50_seconds": 1.12,
+            "p95_seconds": 1.8954
+          },
+          "queue": {
+            "p50_seconds": 8.5463,
+            "p95_seconds": 18.3117
+          },
+          "execution": {
+            "p50_seconds": 1.2144,
+            "p95_seconds": 2.5832
+          },
+          "end_to_end": {
+            "p50_seconds": 28.6027,
+            "p95_seconds": 37.6426
+          },
+          "batch_seconds": 38.102,
+          "tasks_per_minute": 47.24,
+          "model_calls": 30,
+          "model_429": 0,
+          "cross_account_access": 0,
+          "duplicate_results": 0
+        },
+        {
+          "tasks": 60,
+          "accounts": 1,
+          "cache": "cold",
+          "submit": {
+            "p50_seconds": 2.4613,
+            "p95_seconds": 2.9336
+          },
+          "query": {
+            "p50_seconds": 1.7248,
+            "p95_seconds": 2.6491
+          },
+          "save": {
+            "p50_seconds": 2.4255,
+            "p95_seconds": 3.9861
+          },
+          "queue": {
+            "p50_seconds": 16.7356,
+            "p95_seconds": 30.8811
+          },
+          "execution": {
+            "p50_seconds": 0.9491,
+            "p95_seconds": 1.897
+          },
+          "end_to_end": {
+            "p50_seconds": 48.9651,
+            "p95_seconds": 70.2401
+          },
+          "batch_seconds": 71.157,
+          "tasks_per_minute": 50.59,
+          "model_calls": 1,
+          "model_429": 0,
+          "cross_account_access": 0,
+          "duplicate_results": 0
+        },
+        {
+          "tasks": 60,
+          "accounts": 1,
+          "cache": "warm",
+          "submit": {
+            "p50_seconds": 3.6418,
+            "p95_seconds": 4.8016
+          },
+          "query": {
+            "p50_seconds": 1.6364,
+            "p95_seconds": 2.6169
+          },
+          "save": {
+            "p50_seconds": 2.5683,
+            "p95_seconds": 3.7218
+          },
+          "queue": {
+            "p50_seconds": 15.8552,
+            "p95_seconds": 29.0082
+          },
+          "execution": {
+            "p50_seconds": 0.897,
+            "p95_seconds": 1.86
+          },
+          "end_to_end": {
+            "p50_seconds": 48.3643,
+            "p95_seconds": 71.5154
+          },
+          "batch_seconds": 72.401,
+          "tasks_per_minute": 49.72,
+          "model_calls": 0,
+          "model_429": 0,
+          "cross_account_access": 0,
+          "duplicate_results": 0
+        },
+        {
+          "tasks": 60,
+          "accounts": 1,
+          "cache": "different_headers",
+          "submit": {
+            "p50_seconds": 2.3053,
+            "p95_seconds": 3.2475
+          },
+          "query": {
+            "p50_seconds": 1.4674,
+            "p95_seconds": 2.3438
+          },
+          "save": {
+            "p50_seconds": 2.3224,
+            "p95_seconds": 3.5627
+          },
+          "queue": {
+            "p50_seconds": 18.898,
+            "p95_seconds": 29.8178
+          },
+          "execution": {
+            "p50_seconds": 1.1864,
+            "p95_seconds": 2.5316
+          },
+          "end_to_end": {
+            "p50_seconds": 55.0793,
+            "p95_seconds": 73.1653
+          },
+          "batch_seconds": 74.278,
+          "tasks_per_minute": 48.47,
+          "model_calls": 60,
+          "model_429": 0,
+          "cross_account_access": 0,
+          "duplicate_results": 0
+        },
+        {
+          "tasks": 60,
+          "accounts": 4,
+          "cache": "cold",
+          "submit": {
+            "p50_seconds": 1.8665,
+            "p95_seconds": 2.357
+          },
+          "query": {
+            "p50_seconds": 1.5773,
+            "p95_seconds": 2.9871
+          },
+          "save": {
+            "p50_seconds": 2.4731,
+            "p95_seconds": 4.7057
+          },
+          "queue": {
+            "p50_seconds": 16.8545,
+            "p95_seconds": 29.1208
+          },
+          "execution": {
+            "p50_seconds": 0.9794,
+            "p95_seconds": 1.6891
+          },
+          "end_to_end": {
+            "p50_seconds": 50.0932,
+            "p95_seconds": 70.9312
+          },
+          "batch_seconds": 71.82,
+          "tasks_per_minute": 50.13,
+          "model_calls": 1,
+          "model_429": 0,
+          "cross_account_access": 0,
+          "duplicate_results": 0
+        },
+        {
+          "tasks": 60,
+          "accounts": 4,
+          "cache": "warm",
+          "submit": {
+            "p50_seconds": 2.6903,
+            "p95_seconds": 3.341
+          },
+          "query": {
+            "p50_seconds": 1.7056,
+            "p95_seconds": 2.7386
+          },
+          "save": {
+            "p50_seconds": 2.5384,
+            "p95_seconds": 3.7737
+          },
+          "queue": {
+            "p50_seconds": 16.1729,
+            "p95_seconds": 27.8185
+          },
+          "execution": {
+            "p50_seconds": 0.8943,
+            "p95_seconds": 1.4766
+          },
+          "end_to_end": {
+            "p50_seconds": 46.8717,
+            "p95_seconds": 69.1249
+          },
+          "batch_seconds": 70.243,
+          "tasks_per_minute": 51.25,
+          "model_calls": 0,
+          "model_429": 0,
+          "cross_account_access": 0,
+          "duplicate_results": 0
+        },
+        {
+          "tasks": 60,
+          "accounts": 4,
+          "cache": "different_headers",
+          "submit": {
+            "p50_seconds": 1.8757,
+            "p95_seconds": 2.5964
+          },
+          "query": {
+            "p50_seconds": 1.514,
+            "p95_seconds": 2.3384
+          },
+          "save": {
+            "p50_seconds": 2.3928,
+            "p95_seconds": 3.4316
+          },
+          "queue": {
+            "p50_seconds": 16.9555,
+            "p95_seconds": 28.6328
+          },
+          "execution": {
+            "p50_seconds": 1.0767,
+            "p95_seconds": 2.1457
+          },
+          "end_to_end": {
+            "p50_seconds": 49.6925,
+            "p95_seconds": 71.4193
+          },
+          "batch_seconds": 72.454,
+          "tasks_per_minute": 49.69,
+          "model_calls": 60,
+          "model_429": 0,
+          "cross_account_access": 0,
+          "duplicate_results": 0
+        }
+      ],
+      "large_samples": []
+    },
+    {
+      "source": ".codex-artifacts/capacity-large-index-20261017/report.json",
+      "sha256": "ed5ba079bcfc88f907cefe785b9292221ddccafa5eef4b885571af08c6194efe",
+      "completed": false,
+      "failure_type": "WorkflowError",
+      "model": "synthetic HTTP, 100 ms/request; no production model or business files",
+      "platform": "Linux-6.18.33.2-microsoft-standard-WSL2-x86_64-with-glibc2.41",
+      "python": "3.12.14",
+      "cpu_logical": 12,
+      "host_memory_gb": 15.5,
+      "api_workers": 2,
+      "import_workers": 4,
+      "export_workers": 2,
+      "rq_worker_class": "rq.worker.Worker",
+      "cases": [],
+      "large_samples": [
+        {
+          "rows": 10000,
+          "columns": 100,
+          "seconds": 235.02,
+          "source_bytes": 568898,
+          "legacy_redundant_mapping_bytes": 192820000,
+          "records_table_bytes": 22716416,
+          "export_verified": true,
+          "verified_data_rows": 10000,
+          "data_start_row": 4
+        }
+      ],
+      "resources": {
+        "peak_rss_mb": 2670.5,
+        "peak_cpu_percent": 183.39999999999998,
+        "samples": 843,
+        "lock_wait_samples": 0
+      }
+    },
+    {
+      "source": ".codex-artifacts/capacity-large-20k-index-20261017/report.json",
+      "sha256": "3c5c300d985606a40b95319d4dc5c15e31c27065bc2766510ffdbd0d0450a77e",
+      "completed": true,
+      "model": "synthetic HTTP, 100 ms/request; no production model or business files",
+      "platform": "Linux-6.18.33.2-microsoft-standard-WSL2-x86_64-with-glibc2.41",
+      "python": "3.12.14",
+      "cpu_logical": 12,
+      "host_memory_gb": 15.5,
+      "api_workers": 2,
+      "import_workers": 4,
+      "export_workers": 2,
+      "rq_worker_class": "rq.worker.Worker",
+      "cases": [],
+      "large_samples": [
+        {
+          "rows": 20000,
+          "columns": 50,
+          "seconds": 248.844,
+          "source_bytes": 1148898,
+          "legacy_redundant_mapping_bytes": 192620000,
+          "records_table_bytes": 46391296,
+          "export_verified": true,
+          "verified_data_rows": 20000,
+          "data_start_row": 4
+        }
+      ],
+      "pagination": [
+        {
+          "tasks": 10000,
+          "deep_page_seconds": 0.092,
+          "returned": 30,
+          "explain": [
+            "Limit  (cost=1177.81..1177.86 rows=22 width=55) (actual time=28.777..28.785 rows=30 loops=1)",
+            "  Buffers: shared hit=314",
+            "  ->  Sort  (cost=1152.88..1177.86 rows=9992 width=55) (actual time=27.452..28.317 rows=10000 loops=1)",
+            "        Sort Key: updated_at DESC, id DESC",
+            "        Sort Method: quicksort  Memory: 1713kB",
+            "        Buffers: shared hit=314",
+            "        ->  Seq Scan on workflow_objects  (cost=0.00..489.09 rows=9992 width=55) (actual time=0.009..3.710 rows=10000 loops=1)",
+            "              Filter: (((tenant_id)::text = 'index_4aa55f28'::text) AND ((kind)::text = 'task'::text) AND ((creator_id)::text = 'alice'::text))",
+            "              Rows Removed by Filter: 5",
+            "              Buffers: shared hit=314",
+            "Planning:",
+            "  Buffers: shared hit=61",
+            "Planning Time: 0.770 ms",
+            "Execution Time: 29.330 ms"
+          ]
+        },
+        {
+          "tasks": 100000,
+          "deep_page_seconds": 0.4927,
+          "returned": 30,
+          "explain": [
+            "Limit  (cost=15125.99..15126.74 rows=5 width=55) (actual time=31.796..31.807 rows=30 loops=1)",
+            "  Buffers: shared hit=4517",
+            "  ->  Index Only Scan Backward using ix_workflow_objects_creator_page on workflow_objects  (cost=0.42..15126.74 rows=99975 width=55) (actual time=0.037..28.432 rows=100000 loops=1)",
+            "        Index Cond: ((tenant_id = 'index_4aa55f28'::text) AND (kind = 'task'::text) AND (creator_id = 'alice'::text))",
+            "        Heap Fetches: 100000",
+            "        Buffers: shared hit=4517",
+            "Planning:",
+            "  Buffers: shared hit=56",
+            "Planning Time: 0.663 ms",
+            "Execution Time: 31.841 ms"
+          ]
+        }
+      ],
+      "detail_query": {
+        "json_filter": {
+          "Plan": {
+            "Node Type": "Sort",
+            "Parallel Aware": false,
+            "Async Capable": false,
+            "Startup Cost": 16.24,
+            "Total Cost": 16.24,
+            "Plan Rows": 1,
+            "Plan Width": 1556,
+            "Actual Startup Time": 1.216,
+            "Actual Total Time": 1.217,
+            "Actual Rows": 1,
+            "Actual Loops": 1,
+            "Sort Key": [
+              "created_at DESC",
+              "id DESC"
+            ],
+            "Sort Method": "quicksort",
+            "Sort Space Used": 25,
+            "Sort Space Type": "Memory",
+            "Shared Hit Blocks": 32,
+            "Shared Read Blocks": 1,
+            "Shared Dirtied Blocks": 0,
+            "Shared Written Blocks": 0,
+            "Local Hit Blocks": 0,
+            "Local Read Blocks": 0,
+            "Local Dirtied Blocks": 0,
+            "Local Written Blocks": 0,
+            "Temp Read Blocks": 0,
+            "Temp Written Blocks": 0,
+            "Plans": [
+              {
+                "Node Type": "Bitmap Heap Scan",
+                "Parent Relationship": "Outer",
+                "Parallel Aware": false,
+                "Async Capable": false,
+                "Relation Name": "workflow_objects",
+                "Alias": "workflow_objects",
+                "Startup Cost": 4.45,
+                "Total Cost": 16.23,
+                "Plan Rows": 1,
+                "Plan Width": 1556,
+                "Actual Startup Time": 0.505,
+                "Actual Total Time": 1.206,
+                "Actual Rows": 1,
+                "Actual Loops": 1,
+                "Recheck Cond": "(((tenant_id)::text = 'local'::text) AND ((kind)::text = 'export'::text))",
+                "Rows Removed by Index Recheck": 0,
+                "Filter": "((payload ->> 'task_id'::text) = 'task_565e5c8cc2bfeb008e821a754ca3b0ec'::text)",
+                "Rows Removed by Filter": 1,
+                "Exact Heap Blocks": 1,
+                "Lossy Heap Blocks": 0,
+                "Shared Hit Blocks": 32,
+                "Shared Read Blocks": 1,
+                "Shared Dirtied Blocks": 0,
+                "Shared Written Blocks": 0,
+                "Local Hit Blocks": 0,
+                "Local Read Blocks": 0,
+                "Local Dirtied Blocks": 0,
+                "Local Written Blocks": 0,
+                "Temp Read Blocks": 0,
+                "Temp Written Blocks": 0,
+                "Plans": [
+                  {
+                    "Node Type": "Bitmap Index Scan",
+                    "Parent Relationship": "Outer",
+                    "Parallel Aware": false,
+                    "Async Capable": false,
+                    "Index Name": "ix_workflow_objects_parent_task",
+                    "Startup Cost": 0.0,
+                    "Total Cost": 4.45,
+                    "Plan Rows": 3,
+                    "Plan Width": 0,
+                    "Actual Startup Time": 0.009,
+                    "Actual Total Time": 0.009,
+                    "Actual Rows": 2,
+                    "Actual Loops": 1,
+                    "Index Cond": "(((tenant_id)::text = 'local'::text) AND ((kind)::text = 'export'::text))",
+                    "Shared Hit Blocks": 3,
+                    "Shared Read Blocks": 0,
+                    "Shared Dirtied Blocks": 0,
+                    "Shared Written Blocks": 0,
+                    "Local Hit Blocks": 0,
+                    "Local Read Blocks": 0,
+                    "Local Dirtied Blocks": 0,
+                    "Local Written Blocks": 0,
+                    "Temp Read Blocks": 0,
+                    "Temp Written Blocks": 0
+                  }
+                ]
+              }
+            ]
+          },
+          "Planning": {
+            "Shared Hit Blocks": 12,
+            "Shared Read Blocks": 0,
+            "Shared Dirtied Blocks": 0,
+            "Shared Written Blocks": 0,
+            "Local Hit Blocks": 0,
+            "Local Read Blocks": 0,
+            "Local Dirtied Blocks": 0,
+            "Local Written Blocks": 0,
+            "Temp Read Blocks": 0,
+            "Temp Written Blocks": 0
+          },
+          "Planning Time": 0.26,
+          "Triggers": [],
+          "Execution Time": 1.261
+        },
+        "parent_index": {
+          "Plan": {
+            "Node Type": "Index Scan",
+            "Parallel Aware": false,
+            "Async Capable": false,
+            "Scan Direction": "Backward",
+            "Index Name": "ix_workflow_objects_parent_task",
+            "Relation Name": "workflow_objects",
+            "Alias": "workflow_objects",
+            "Startup Cost": 0.42,
+            "Total Cost": 8.44,
+            "Plan Rows": 1,
+            "Plan Width": 1556,
+            "Actual Startup Time": 0.025,
+            "Actual Total Time": 0.026,
+            "Actual Rows": 1,
+            "Actual Loops": 1,
+            "Index Cond": "(((tenant_id)::text = 'local'::text) AND ((kind)::text = 'export'::text) AND ((parent_task_id)::text = 'task_565e5c8cc2bfeb008e821a754ca3b0ec'::text))",
+            "Rows Removed by Index Recheck": 0,
+            "Shared Hit Blocks": 5,
+            "Shared Read Blocks": 0,
+            "Shared Dirtied Blocks": 0,
+            "Shared Written Blocks": 0,
+            "Local Hit Blocks": 0,
+            "Local Read Blocks": 0,
+            "Local Dirtied Blocks": 0,
+            "Local Written Blocks": 0,
+            "Temp Read Blocks": 0,
+            "Temp Written Blocks": 0
+          },
+          "Planning": {
+            "Shared Hit Blocks": 0,
+            "Shared Read Blocks": 0,
+            "Shared Dirtied Blocks": 0,
+            "Shared Written Blocks": 0,
+            "Local Hit Blocks": 0,
+            "Local Read Blocks": 0,
+            "Local Dirtied Blocks": 0,
+            "Local Written Blocks": 0,
+            "Temp Read Blocks": 0,
+            "Temp Written Blocks": 0
+          },
+          "Planning Time": 0.1,
+          "Triggers": [],
+          "Execution Time": 0.061
+        }
+      },
+      "resources": {
+        "peak_rss_mb": 2738.9,
+        "peak_cpu_percent": 175.2,
+        "samples": 905,
+        "lock_wait_samples": 0
+      }
+    },
+    {
+      "source": ".codex-artifacts/capacity-workers2-20261017/report.json",
+      "sha256": "e9422c5d6422903a5b24e0cf2c95f31157f127428707cfa5d86b5befd3f82a27",
+      "completed": true,
+      "model": "synthetic HTTP, 100 ms/request; no production model or business files",
+      "platform": "Linux-6.18.33.2-microsoft-standard-WSL2-x86_64-with-glibc2.41",
+      "python": "3.12.14",
+      "cpu_logical": 12,
+      "host_memory_gb": 15.5,
+      "api_workers": 2,
+      "import_workers": 2,
+      "export_workers": 2,
+      "rq_worker_class": "rq.worker.Worker",
+      "cases": [
+        {
+          "tasks": 30,
+          "accounts": 4,
+          "cache": "different_headers",
+          "submit": {
+            "p50_seconds": 1.3599,
+            "p95_seconds": 1.6239
+          },
+          "query": {
+            "p50_seconds": 0.7117,
+            "p95_seconds": 1.565
+          },
+          "save": {
+            "p50_seconds": 0.728,
+            "p95_seconds": 2.2207
+          },
+          "queue": {
+            "p50_seconds": 2.5549,
+            "p95_seconds": 42.2356
+          },
+          "execution": {
+            "p50_seconds": 1.1848,
+            "p95_seconds": 3.1449
+          },
+          "end_to_end": {
+            "p50_seconds": 37.0404,
+            "p95_seconds": 48.9937
+          },
+          "batch_seconds": 49.573,
+          "tasks_per_minute": 36.31,
+          "model_calls": 30,
+          "model_429": 0,
+          "cross_account_access": 0,
+          "duplicate_results": 0
+        },
+        {
+          "tasks": 60,
+          "accounts": 4,
+          "cache": "different_headers",
+          "submit": {
+            "p50_seconds": 1.9517,
+            "p95_seconds": 2.5495
+          },
+          "query": {
+            "p50_seconds": 1.176,
+            "p95_seconds": 2.5551
+          },
+          "save": {
+            "p50_seconds": 1.5912,
+            "p95_seconds": 3.704
+          },
+          "queue": {
+            "p50_seconds": 5.3879,
+            "p95_seconds": 70.3301
+          },
+          "execution": {
+            "p50_seconds": 1.2267,
+            "p95_seconds": 2.585
+          },
+          "end_to_end": {
+            "p50_seconds": 56.8367,
+            "p95_seconds": 86.3037
+          },
+          "batch_seconds": 87.582,
+          "tasks_per_minute": 41.1,
+          "model_calls": 60,
+          "model_429": 0,
+          "cross_account_access": 0,
+          "duplicate_results": 0
+        }
+      ],
+      "resources": {
+        "peak_rss_mb": 2005.6,
+        "peak_cpu_percent": 496.0,
+        "samples": 493,
+        "lock_wait_samples": 1
+      }
+    },
+    {
+      "source": ".codex-artifacts/capacity-workers4-20261017/report.json",
+      "sha256": "2e8d720547a868a3aeb17355c626fc8ee2f87a0a5d6ac985ba2401c0b1602802",
+      "completed": true,
+      "model": "synthetic HTTP, 100 ms/request; no production model or business files",
+      "platform": "Linux-6.18.33.2-microsoft-standard-WSL2-x86_64-with-glibc2.41",
+      "python": "3.12.14",
+      "cpu_logical": 12,
+      "host_memory_gb": 15.5,
+      "api_workers": 2,
+      "import_workers": 4,
+      "export_workers": 2,
+      "rq_worker_class": "rq.worker.Worker",
+      "cases": [
+        {
+          "tasks": 30,
+          "accounts": 4,
+          "cache": "different_headers",
+          "submit": {
+            "p50_seconds": 1.7791,
+            "p95_seconds": 2.1621
+          },
+          "query": {
+            "p50_seconds": 1.2117,
+            "p95_seconds": 2.1256
+          },
+          "save": {
+            "p50_seconds": 1.8591,
+            "p95_seconds": 3.1598
+          },
+          "queue": {
+            "p50_seconds": 10.3493,
+            "p95_seconds": 35.0767
+          },
+          "execution": {
+            "p50_seconds": 1.8249,
+            "p95_seconds": 5.2805
+          },
+          "end_to_end": {
+            "p50_seconds": 45.6587,
+            "p95_seconds": 52.911
+          },
+          "batch_seconds": 52.948,
+          "tasks_per_minute": 34.0,
+          "model_calls": 30,
+          "model_429": 0,
+          "cross_account_access": 0,
+          "duplicate_results": 0
+        },
+        {
+          "tasks": 60,
+          "accounts": 4,
+          "cache": "different_headers",
+          "submit": {
+            "p50_seconds": 1.6398,
+            "p95_seconds": 2.5909
+          },
+          "query": {
+            "p50_seconds": 1.6511,
+            "p95_seconds": 3.1801
+          },
+          "save": {
+            "p50_seconds": 2.4984,
+            "p95_seconds": 4.6537
+          },
+          "queue": {
+            "p50_seconds": 16.6383,
+            "p95_seconds": 38.0202
+          },
+          "execution": {
+            "p50_seconds": 1.1814,
+            "p95_seconds": 3.0342
+          },
+          "end_to_end": {
+            "p50_seconds": 53.8763,
+            "p95_seconds": 73.9531
+          },
+          "batch_seconds": 74.765,
+          "tasks_per_minute": 48.15,
+          "model_calls": 60,
+          "model_429": 0,
+          "cross_account_access": 0,
+          "duplicate_results": 0
+        }
+      ],
+      "resources": {
+        "peak_rss_mb": 2719.8,
+        "peak_cpu_percent": 559.4000000000001,
+        "samples": 453,
+        "lock_wait_samples": 0
+      }
+    }
+  ],
+  "regression": [
+    {
+      "source": ".codex-artifacts/final-regression-20261017.xml",
+      "sha256": "8079dba9a3bb5b4cd238c1c7b5d50fc358666a61e6acfe611f8f4fde2e0ecb0a",
+      "suites": [
+        {
+          "name": "pytest",
+          "errors": "0",
+          "failures": "0",
+          "skipped": "65",
+          "tests": "567",
+          "time": "99.847",
+          "timestamp": "2026-10-17T00:44:08.356576+08:00",
+          "hostname": "DESKTOP-I6ARGDA"
+        }
+      ]
+    },
+    {
+      "source": ".codex-artifacts/final-infrastructure-20261017.xml",
+      "sha256": "1a05edc00ce44d61b323544994a761a2b1a518fe80d3ef48fe7055b00b9f108c",
+      "suites": [
+        {
+          "name": "pytest",
+          "errors": "0",
+          "failures": "0",
+          "skipped": "0",
+          "tests": "7",
+          "time": "17.319",
+          "timestamp": "2026-10-17T00:44:11.598859+08:00",
+          "hostname": "da74e90aa3ec"
+        }
+      ]
+    }
+  ]
+}

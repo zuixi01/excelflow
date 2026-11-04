@@ -12,6 +12,9 @@ def validate_production_environment(environment: Mapping[str, str] | None = None
         return
 
     errors: list[str] = []
+    model_key_file = env.get('EXCEL_AUDITOR_MODEL_KEY_FILE', '')
+    if not model_key_file or not os.path.isabs(model_key_file):
+        errors.append('EXCEL_AUDITOR_MODEL_KEY_FILE must be an absolute mounted secret path')
     database_url = env.get("DATABASE_URL", "")
     if not database_url:
         errors.append("DATABASE_URL is required")

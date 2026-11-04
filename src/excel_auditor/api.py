@@ -12,6 +12,7 @@ from typing import Any
 from fastapi import BackgroundTasks, FastAPI, File, Form, Header, HTTPException, Query, Request, UploadFile
 from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, RedirectResponse
 from fastapi.exceptions import RequestValidationError
+from starlette.concurrency import run_in_threadpool
 from pydantic import BaseModel, ValidationError
 
 from .models import DifferenceType, RuleSet
@@ -21,7 +22,7 @@ from .rules import DraftRegistry, RuleRegistry, parse_rule_document
 from .service import AuditService
 from .standard_sources import ConnectionRegistry, ManagedHttpSource
 from .persistence import DatabaseRepository
-from .queueing import RedisJobQueue
+from .queueing import RedisJobQueue, select_queue
 from .storage import S3ArtifactStore
 from .rendering import DotNetOpenXmlRenderer
 from .observability import configure_logging, metrics
@@ -29,26 +30,46 @@ from .strict_serialization import dump_json_exact, load_json_strict
 from .product_workflow import ManagedHttpCatalogAdapter, ProductReviewDecision
 from .product_workflow.merchant_service import MerchantReconciliationService
 from .product_workflow.service import ProductWorkflowService
+from .field_reconciliation_routes import build_router as build_field_reconciliation_router
+from .auth_service import AuthService
+from .auth_routes import build_router as build_auth_router
+from .user_routes import build_router as build_user_router
 
 
 DATA_ROOT = Path(os.environ.get("EXCEL_AUDITOR_DATA", "var")).resolve()
+DATA_ROOT.mkdir(parents=True, exist_ok=True)
+if os.environ.get('EXCEL_AUDITOR_ENV', '').lower() in {'production', 'prod'}:
+    # Multipart spooling must share the monitored persistent disk, not unbounded /tmp RAM.
+    temporary_root = DATA_ROOT / 'tmp'
+    temporary_root.mkdir(parents=True, exist_ok=True)
+    tempfile.tempdir = str(temporary_root)
 configure_logging()
 connections_path = os.environ.get("EXCEL_AUDITOR_CONNECTIONS")
 managed_http = ManagedHttpSource(ConnectionRegistry(Path(connections_path))) if connections_path else None
 database_url = os.environ.get("DATABASE_URL")
 database = DatabaseRepository(database_url, create_schema=os.environ.get("EXCEL_AUDITOR_AUTO_CREATE_SCHEMA") == "1") if database_url else None
+auth_database = database or DatabaseRepository(
+    os.environ.get("EXCEL_AUDITOR_AUTH_DATABASE_URL", f"sqlite:///{(DATA_ROOT / 'auth.sqlite3').as_posix()}"),
+    create_schema=True,
+)
+auth_service = AuthService(auth_database)
+admin_username = os.environ.get("EXCEL_AUDITOR_ADMIN_USERNAME", "admin")
+admin_password = os.environ.get("EXCEL_AUDITOR_ADMIN_PASSWORD")
+if admin_password:
+    auth_database.ensure_local_admin(username=admin_username, password=admin_password)
 s3_bucket = os.environ.get("S3_BUCKET")
 artifact_store = S3ArtifactStore(s3_bucket, os.environ.get("S3_ENDPOINT_URL"), os.environ.get("AWS_REGION"), os.environ.get("S3_SERVER_SIDE_ENCRYPTION", "AES256")) if s3_bucket else None
 service = AuditService(DATA_ROOT, managed_http=managed_http, database=database, artifact_store=artifact_store)
 product_service = ProductWorkflowService(service, database)
 merchant_reconciliation_service = MerchantReconciliationService(service)
 redis_url = os.environ.get("REDIS_URL")
-task_queue = RedisJobQueue(redis_url) if redis_url else None
+task_queue = RedisJobQueue(redis_url, queue_name=os.environ.get("EXCEL_AUDITOR_API_QUEUE", "normal")) if redis_url else None
 app = FastAPI(title="Excel Standard Auditor", version="0.1.0")
 from .workflow.routes import build_router as build_workflow_router
 from .workflow.models import WorkflowError
 
-app.include_router(build_workflow_router(DATA_ROOT, database, task_queue))
+app.include_router(build_workflow_router(DATA_ROOT, database, task_queue, auth_database=auth_database))
+app.include_router(build_field_reconciliation_router(DATA_ROOT, lambda: service, lambda: managed_http, lambda: task_queue, auth_database=auth_database))
 
 
 @app.exception_handler(WorkflowError)
@@ -72,8 +93,10 @@ if os.environ.get("EXCEL_AUDITOR_API_TOKENS_JSON"):
             raise RuntimeError("each API token identity requires tenant_id and user_id")
 if api_token:
     token_registry[api_token] = {"tenant_id": "default", "user_id": "service"}
-if require_auth and not token_registry:
-    raise RuntimeError("production authentication is required but no API token is configured")
+auth_required = require_auth or bool(token_registry)
+app.include_router(build_auth_router(auth_service, auth_required=auth_required))
+app.include_router(build_user_router(auth_database, auth_service))
+app.include_router(build_user_router(auth_database, auth_service, prefix="/api/v1/operators"))
 
 
 async def _stage_standard_upload(upload: UploadFile, size_limit: int) -> tuple[Path, int]:
@@ -109,15 +132,57 @@ async def bearer_auth(request: Request, call_next):
     request.state.trace_id = trace_id[:128]
     request.state.tenant_id = "local"
     request.state.user_id = "local"
-    if token_registry and not request.url.path.startswith("/health/"):
+    request.state.username = "local"
+    request.state.role = "owner"
+    request.state.auth_method = "local"
+    request.state.authenticated = not auth_required
+    request.state.auth_session_id = None
+    request.state.session_token = ""
+    request.state.session_expires_at = None
+
+    session_token = request.cookies.get("excel_flow_session", "")
+    if session_token:
+        identity = await run_in_threadpool(auth_service.validate_session, session_token)
+        if identity is not None:
+            request.state.tenant_id = identity.tenant_id
+            request.state.user_id = identity.user_id
+            request.state.username = identity.username
+            request.state.role = identity.role
+            request.state.auth_method = "session"
+            request.state.authenticated = True
+            request.state.auth_session_id = identity.session_id
+            request.state.session_token = session_token
+            request.state.session_expires_at = identity.expires_at
+
+    if not request.state.authenticated and token_registry:
         authorization = request.headers.get("authorization", "")
         token = authorization.removeprefix("Bearer ") if authorization.startswith("Bearer ") else ""
         identity = token_registry.get(token)
-        if identity is None:
-            return JSONResponse(status_code=401, media_type="application/problem+json", content={"type": "about:blank", "title": "Unauthorized", "status": 401, "detail": "valid bearer token required"})
-        request.state.tenant_id = identity["tenant_id"]
-        request.state.user_id = identity["user_id"]
-    response = await call_next(request)
+        if identity is not None:
+            request.state.tenant_id = identity["tenant_id"]
+            request.state.user_id = identity["user_id"]
+            request.state.username = identity["user_id"]
+            request.state.role = "service"
+            request.state.auth_method = "bearer"
+            request.state.authenticated = True
+
+    public = request.url.path.startswith("/health/") or request.url.path == "/api/v1/auth/login"
+    if auth_required and not request.state.authenticated and not public:
+        return JSONResponse(status_code=401, media_type="application/problem+json", content={"type": "about:blank", "title": "Unauthorized", "status": 401, "detail": "authentication required"})
+
+    if request.state.auth_method == "session" and request.method in {"POST", "PUT", "PATCH", "DELETE"}:
+        if request.state.role == "viewer" and not request.url.path.startswith("/api/v1/auth/"):
+            return JSONResponse(status_code=403, content={"detail": "read-only role"})
+        admin_paths = ("/api/v1/schemas", "/api/v1/mappings/confirm", "/api/v1/workflow-templates", "/api/v1/field-profile", "/api/v1/workflow-settings")
+        if request.url.path.startswith(admin_paths) and request.state.role not in {"owner", "admin"}:
+            return JSONResponse(status_code=403, content={"detail": "administrator role required"})
+
+    if request.state.auth_method == "session" and request.method in {"POST", "PUT", "PATCH", "DELETE"} and request.url.path != "/api/v1/auth/login":
+        csrf = request.headers.get("x-csrf-token", "")
+        if not await run_in_threadpool(auth_service.validate_csrf, request.state.auth_session_id, csrf):
+            return JSONResponse(status_code=403, content={"detail": "CSRF token required"})
+    from .workflow.upload_guard import guarded_request
+    response = await guarded_request(request, call_next, DATA_ROOT, database.engine if database else None)
     response.headers["X-Request-ID"] = request.state.trace_id
     return response
 
@@ -154,7 +219,12 @@ def ready():
 
 @app.get("/metrics", response_class=PlainTextResponse)
 def prometheus_metrics() -> str:
-    return metrics.prometheus()
+    from .workflow.upload_guard import guard_store
+    from .workflow.maintenance_ops import health
+    state = health(guard_store(DATA_ROOT, database.engine if database else None))
+    lines = [f'excel_auditor_workflow_{name} {state[name]}' for name in ('disk_free_bytes', 'oldest_wait_seconds', 'expired_running')]
+    lines += [f'excel_auditor_workflow_executions{{status="{status}"}} {count}' for status, count in state['executions'].items()]
+    return metrics.prometheus() + '\n'.join(lines) + '\n'
 
 
 @app.post("/api/v1/workbooks/precheck")
@@ -296,6 +366,8 @@ def publish_draft(schema_id: str, draft_id: str, request: Request) -> dict:
         if database:
             database.publish_rule(rules, request.state.user_id, request.state.tenant_id)
         tenant_drafts.mark_published(schema_id, draft_id)
+    except ValidationError as exc:
+        raise HTTPException(422, "规则校验失败，请修正草稿后再发布。") from exc
     except FileNotFoundError as exc:
         raise HTTPException(404, str(exc)) from exc
     except FileExistsError as exc:
@@ -419,7 +491,8 @@ async def create_comparison(
         elif standard_content is not None:
             fingerprint.update((standard_suffix or "").encode("ascii"))
             fingerprint.update(standard_content)
-        job_id, replayed = service.create_or_get_job(idempotency_key, fingerprint.hexdigest(), request.state.tenant_id, request.state.user_id, request.state.trace_id)
+        queue_name = select_queue("comparison", estimated_bytes=len(excel_content))
+        job_id, replayed = service.create_or_get_job(idempotency_key, fingerprint.hexdigest(), request.state.tenant_id, request.state.user_id, request.state.trace_id, queue_name)
         if replayed:
             current = service.status(job_id)
             return JSONResponse(status_code=200, content={"job_id": job_id, "status": current["status"], "schema_id": schema_id, "schema_version": schema_version, "created_at": current["created_at"], "idempotent_replay": True})
@@ -437,16 +510,17 @@ async def create_comparison(
         excel_path.write_bytes(excel_content)
         if task_queue:
             try:
-                task_queue.enqueue(DATA_ROOT, job_id, excel_path, standard_path, rules, parsed_parameters)
+                task_queue.enqueue(DATA_ROOT, job_id, excel_path, standard_path, rules, parsed_parameters, queue_name)
             except Exception as exc:
                 raise HTTPException(503, "task queue is unavailable") from exc
         else:
             background_tasks.add_task(service.run, job_id, excel_path, standard_path, rules, parsed_parameters)
-        return {"job_id": job_id, "status": "queued", "schema_id": schema_id, "schema_version": schema_version, "created_at": service.status(job_id)["created_at"]}
+        return {"job_id": job_id, "status": "queued", "queue_name": service.status(job_id).get("queue_name", queue_name), "schema_id": schema_id, "schema_version": schema_version, "created_at": service.status(job_id)["created_at"]}
     except FileExistsError as exc:
         raise HTTPException(409, str(exc)) from exc
     except ValueError as exc:
-        raise HTTPException(429 if "TENANT_QUOTA_EXCEEDED" in str(exc) else 422, str(exc)) from exc
+        message = str(exc)
+        raise HTTPException(429 if "QUOTA_EXCEEDED" in message else 422, message) from exc
     finally:
         if staged_standard_path is not None:
             staged_standard_path.unlink(missing_ok=True)
@@ -933,6 +1007,8 @@ def _authorize_job(request: Request, job_id: str) -> dict:
         raise HTTPException(404, str(exc)) from exc
     if status.get("tenant_id", "local") != request.state.tenant_id:
         # Do not reveal whether a cross-tenant job exists.
+        raise HTTPException(404, "job not found")
+    if request.state.role not in {"owner", "admin", "service"} and status.get("user_id") != request.state.user_id:
         raise HTTPException(404, "job not found")
     if status.get("deleted_at"):
         raise HTTPException(404, "job not found")

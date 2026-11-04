@@ -6,6 +6,7 @@ from excel_auditor.security_config import validate_production_environment
 def _production_environment() -> dict[str, str]:
     return {
         "EXCEL_AUDITOR_ENV": "production",
+        "EXCEL_AUDITOR_MODEL_KEY_FILE": "/run/secrets/model-key",
         "DATABASE_URL": "postgresql+psycopg://user:secret@database:5432/auditor?sslmode=verify-full",
         "REDIS_URL": "rediss://redis:6379/0",
         "S3_BUCKET": "auditor",

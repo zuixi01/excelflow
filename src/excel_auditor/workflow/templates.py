@@ -9,6 +9,7 @@ from sqlalchemy import delete, select
 
 from .ai import AIClient
 from .excel import cell_text, discover, field_matches, transform, validate_records, write_output
+from .uploads import persist
 from .models import ColumnRule, MaintenanceField, OutputColumn, OutputFile, OutputSheet, TemplateEdit, WorkflowConfig, WorkflowError, content_hash, starter_config
 from .repository import WorkflowStore, identifier, objects
 from .tasks import TaskService, suggest_bindings, write_json
@@ -90,6 +91,9 @@ class TemplateService:
                     source_path = self.store.directory(source_id) / filename
                     if source_path.exists():
                         shutil.copyfile(source_path, self.store.directory(obj["id"]) / filename)
+                sample = source["payload"].get("sample_file")
+                if sample and (self.store.directory(source_id) / sample).exists():
+                    shutil.copyfile(self.store.directory(source_id) / sample, self.store.directory(obj["id"]) / "sample.json")
         return self.store.public(obj)
 
     def upload(self, tenant: str, name: str, content: bytes, purpose: str = "output"):
@@ -108,14 +112,17 @@ class TemplateService:
             obj = self.store.get(con, template_id, tenant, "template")
             if obj["status"] == "published":
                 raise WorkflowError("已发布版本不可修改，请先创建新版本。", 409)
+            if obj["status"] in {"processing", "learning"}:
+                raise WorkflowError("模板正在处理，请稍后上传。", 409)
+            obj = self.store.claim(con, template_id, tenant, obj["revision"], "template")
             obj["status"] = "processing"
             obj["payload"].setdefault("purpose", purpose)
             obj["payload"]["parsing_purpose"] = purpose
+            directory = self.store.directory(template_id)
+            persist(directory / f"{purpose}.xlsx", content)
+            if purpose == "output":
+                persist(directory / "reference.xlsx", content)
             self.store.save(con, obj)
-        directory = self.store.directory(template_id)
-        (directory / f"{purpose}.xlsx").write_bytes(content)
-        if purpose == "output":
-            (directory / "reference.xlsx").write_bytes(content)
         return self.get(template_id, tenant)
 
     def retry(self, template_id: str, tenant: str, base_revision: int):
@@ -279,13 +286,16 @@ class TemplateService:
             if purpose == "output":
                 config.outputs = [OutputFile(name="最终商品表.xlsx", sheets=output_sheets)]
             config = WorkflowConfig.model_validate(config.model_dump(mode="json"))
-            write_json(self.store.directory(template_id) / "sample.json", examples)
+            filename = f"sample-{self.store.execution[1]}.json" if self.store.execution else "sample.json"
+            write_json(self.store.directory(template_id) / filename, examples)
             with self.store.engine.begin() as con:
                 current = self.store.get(con, template_id, tenant, "template")
+                if current["revision"] != obj["revision"] or current["status"] != "processing":
+                    return
                 sources = current["payload"].setdefault("sources", {})
                 sources[purpose] = {"filename": source_path.name, "sheets": [{"name": sheet["sheet"], "columns": len(sheet["columns"])} for sheet in sheets]}
                 current["payload"].update(config=config.model_dump(mode="json"), notes=notes, confirmed=False,
-                                          sample_count=len(examples), dynamic_columns=dynamic_columns,
+                                          sample_count=len(examples), sample_file=filename, dynamic_columns=dynamic_columns,
                                           structure=[{key: value for key, value in sheet.items() if key not in {"rows", "preview"}} for sheet in sheets])
                 current["status"] = "draft"
                 self.store.save(con, current)
@@ -324,7 +334,7 @@ class TemplateService:
             with self.store.engine.connect() as con:
                 obj = self.store.get(con, template_id, tenant, "template")
                 config = WorkflowConfig.model_validate(obj["payload"]["config"])
-            sample_path = self.store.directory(template_id) / "sample.json"
+            sample_path = self.store.directory(template_id) / obj["payload"].get("sample_file", "sample.json")
             samples = json.loads(sample_path.read_text(encoding="utf-8")) if sample_path.exists() else []
             suggestion = AIClient(self.store.root, tenant).suggest(config, obj["payload"].get("instructions", ""), samples)
             changed = config.model_dump(mode="json")
@@ -332,7 +342,7 @@ class TemplateService:
             notes = []
             for patch in suggestion.get("fields", []):
                 if not isinstance(patch, dict) or set(patch) - {"id", "type", "required", "aliases", "reason"} or patch.get("id") not in fields:
-                    raise WorkflowError("AI 字段建议包含未知字段或操作，请重试。", 502)
+                    raise WorkflowError("AI 字段建议包含未知字段或操作，请重试。", 502, "AI_INVALID_DRAFT")
                 rule = fields[patch["id"]]["rule"]
                 for key in ("type", "required", "aliases"):
                     if key in patch:
@@ -340,16 +350,16 @@ class TemplateService:
                 notes.append(f"AI 建议 / {rule['title']}：{str(patch.get('reason', '请确认字段规则'))[:500]}")
             for patch in suggestion.get("columns", []):
                 if not isinstance(patch, dict) or set(patch) - {"file", "sheet", "column", "field", "operation", "argument", "sources", "part", "reason"}:
-                    raise WorkflowError("AI 输出建议包含不支持的操作。", 502)
+                    raise WorkflowError("AI 输出建议包含不支持的操作。", 502, "AI_INVALID_DRAFT")
                 indexes = [patch.get(key) for key in ("file", "sheet", "column")]
                 if any(type(index) is not int or index < 0 for index in indexes):
-                    raise WorkflowError("AI 输出建议索引无效。", 502)
+                    raise WorkflowError("AI 输出建议索引无效。", 502, "AI_INVALID_DRAFT")
                 try:
                     column = changed["outputs"][indexes[0]]["sheets"][indexes[1]]["columns"][indexes[2]]
                 except IndexError as exc:
-                    raise WorkflowError("AI 输出建议引用了不存在的列。", 502) from exc
+                    raise WorkflowError("AI 输出建议引用了不存在的列。", 502, "AI_INVALID_DRAFT") from exc
                 if patch.get("operation") == "formula":
-                    raise WorkflowError("AI 不能直接生成可执行公式，请在输出配置中明确设置。", 502)
+                    raise WorkflowError("AI 不能直接生成可执行公式，请在输出配置中明确设置。", 502, "AI_INVALID_DRAFT")
                 for key in ("field", "operation", "argument", "sources", "part"):
                     if key in patch:
                         column[key] = patch[key]
@@ -368,6 +378,8 @@ class TemplateService:
                 current["status"] = "draft"
                 self.store.save(con, current)
         except Exception as exc:
+            if self.store.execution is not None:
+                raise
             error = exc if isinstance(exc, WorkflowError) else WorkflowError("AI 草稿未通过规则校验，请人工检查模板或重试。", 502)
             TaskService(self.store).fail(template_id, tenant, error, "template")
 
@@ -387,7 +399,7 @@ class TemplateService:
             base_revision = current["revision"]
         if sample_content:
             sample_path = directory / f"sample-{identifier('trial')}.xlsx"
-            sample_path.write_bytes(sample_content)
+            persist(sample_path, sample_content)
             discovered = discover(sample_path, config.fields)
             suggest_bindings(discovered, config)
             sample_rows = []
@@ -403,7 +415,7 @@ class TemplateService:
         else:
             if obj["payload"].get("ai_model"):
                 raise WorkflowError("AI 调整后请上传原始数据样例，以验证最新字段映射。")
-            sample_path = directory / "sample.json"
+            sample_path = directory / obj["payload"].get("sample_file", "sample.json")
             sample_rows = json.loads(sample_path.read_text(encoding="utf-8")) if sample_path.exists() else []
         if not sample_rows:
             raise WorkflowError("模板没有样例数据，请上传一份原始数据样例进行试运行。")

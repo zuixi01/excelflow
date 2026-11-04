@@ -9,10 +9,12 @@ var/
 dist/
 build/
 .env
+deploy/production.env
 *.log
 .tools/
 node_modules/
 services/excel_renderer/bin/
 services/excel_renderer/obj/
 .codex-artifacts/
+.superpowers/
 outputs/

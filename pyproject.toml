@@ -9,8 +9,10 @@ description = "Configuration-driven Excel standard-data audit and safe repair pl
 requires-python = ">=3.12"
 dependencies = [
   "alembic==1.19.1",
+  "argon2-cffi==21.3.0",
   "fastapi==0.141.1",
   "boto3==1.43.82",
+  "cryptography==46.0.3",
   "datacompy==1.0.4",
   "httpx==0.28.1",
   "ijson==3.5.1",
@@ -26,6 +28,7 @@ dependencies = [
   "SQLAlchemy==2.0.52",
   "psycopg[binary]==3.3.4",
   "uvicorn==0.52.4",
+  "pillow==13.0.0",
 ]
 
 [project.optional-dependencies]
@@ -37,6 +40,7 @@ excel-auditor-api = "excel_auditor.api:run"
 excel-auditor-server = "excel_auditor.startup:run"
 excel-auditor-worker = "excel_auditor.worker:run"
 excel-auditor-retention = "excel_auditor.retention:run"
+excel-auditor-admin = "excel_auditor.admin_cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

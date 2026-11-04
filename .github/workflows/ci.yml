@@ -9,6 +9,29 @@ permissions:
   contents: read
 
 jobs:
+  production-deployment-config:
+    runs-on: ubuntu-latest
+    env:
+      API_IMAGE: example/api:ci
+      WEB_IMAGE: example/web:ci
+      DATABASE_URL: postgresql+psycopg://ci:ci@db:5432/excel?sslmode=require
+      REDIS_URL: rediss://redis:6379/0
+      S3_BUCKET: ci
+      EXCEL_AUDITOR_API_TOKEN: "00000000000000000000000000000000"
+      EXCEL_AUDITOR_ADMIN_PASSWORD: "0000000000000000"
+      MODEL_KEY_FILE: /tmp/model-key
+      PLATFORM_KEY_FILE: /tmp/platform-key
+      SERVICE_CA_FILE: /tmp/service-ca.pem
+      SECRET_READ_GID: "1000"
+      EXCEL_AUDITOR_TRUSTED_PROXY_IPS: "*"
+      PUBLIC_HOSTNAME: excel.internal
+      TLS_CERT_FILE: /tmp/tls.crt
+      TLS_KEY_FILE: /tmp/tls.key
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - run: bash -n deploy/production.sh
+      - run: docker compose -f deploy/docker-compose.prod.yaml -f deploy/docker-compose.tls.yaml config --quiet
+
   python:
     runs-on: ubuntu-latest
     strategy:

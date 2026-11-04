@@ -21,6 +21,24 @@
       "max_records": 500000,
       "allow_private_network": false,
       "allow_insecure_http": false
+    },
+    {
+      "id": "merchant-field-standard",
+      "base_url": "https://merchant-platform.example.com/",
+      "allowed_paths": ["/api/v1/field-standards"],
+      "auth_secret_ref": "merchant_platform_token",
+      "timeout_seconds": 15,
+      "max_response_bytes": 16777216,
+      "max_records": 500000,
+      "allow_private_network": false,
+      "allow_insecure_http": false,
+      "field_reconciliation": {
+        "title": "商户平台商品字段",
+        "tenant_ids": ["default"],
+        "path": "/api/v1/field-standards",
+        "method": "GET",
+        "parameter_mapping": {"merchant_id": "merchant_id", "category_id": "category_id"}
+      }
     }
   ]
 }

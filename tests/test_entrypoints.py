@@ -39,7 +39,8 @@ def test_worker_uses_configured_redis_queue_and_security(monkeypatch):
     monkeypatch.setattr(rq, "Queue", lambda name, connection: (calls.append(("queue", name, connection)) or queue))
 
     class FakeWorker:
-        def __init__(self, queues, connection):
+        def __init__(self, queues, connection, name):
+            assert name == worker.socket.gethostname()
             calls.append(("worker", queues, connection))
 
         def work(self):
@@ -54,6 +55,22 @@ def test_worker_uses_configured_redis_queue_and_security(monkeypatch):
         ("worker", [queue], connection),
         "work",
     ]
+
+
+def test_api_worker_count_is_configurable_and_bounded(monkeypatch):
+    import pytest
+    from excel_auditor import startup
+
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+    monkeypatch.setattr(startup, "validate_production_environment", lambda: None)
+    calls = []
+    monkeypatch.setattr(startup.uvicorn, "run", lambda *args, **kwargs: calls.append(kwargs))
+    monkeypatch.setenv("EXCEL_AUDITOR_API_WORKERS", "2")
+    startup.run()
+    assert calls[0]["workers"] == 2
+    monkeypatch.setenv("EXCEL_AUDITOR_API_WORKERS", "100")
+    with pytest.raises(ValueError, match="between 1 and 16"):
+        startup.run()
 
 
 def test_retention_entrypoint_builds_adapters_and_reports_count(tmp_path, monkeypatch, capsys):

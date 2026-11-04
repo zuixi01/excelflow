@@ -48,7 +48,7 @@ class AuditService:
         self.artifact_store = artifact_store
         self.standard_validator = StandardDataValidator()
 
-    def create_job(self, job_id: str | None = None, tenant_id: str = "local", user_id: str = "local", trace_id: str | None = None) -> str:
+    def create_job(self, job_id: str | None = None, tenant_id: str = "local", user_id: str = "local", trace_id: str | None = None, queue_name: str = "normal") -> str:
         job_id = job_id or new_ulid("job_")
         directory = self.jobs / job_id
         active_limit = int(os.environ.get("EXCEL_AUDITOR_MAX_ACTIVE_JOBS_PER_TENANT", "10"))
@@ -64,7 +64,7 @@ class AuditService:
             if active >= active_limit:
                 raise ValueError("TENANT_QUOTA_EXCEEDED: active comparison limit reached")
             directory.mkdir(parents=True, exist_ok=False)
-            initial_status = {"job_id": job_id, "tenant_id": tenant_id, "user_id": user_id, "trace_id": trace_id, "status": "queued", "progress": 0, "created_at": _now(), "retention_until": (datetime.now(timezone.utc) + timedelta(days=_retention_days(tenant_id))).isoformat()}
+            initial_status = {"job_id": job_id, "tenant_id": tenant_id, "user_id": user_id, "trace_id": trace_id, "status": "queued", "progress": 0, "queue_name": queue_name, "attempt": 0, "worker_id": None, "lease_expires_at": None, "created_at": _now(), "retention_until": (datetime.now(timezone.utc) + timedelta(days=_retention_days(tenant_id))).isoformat()}
             self._write_status(job_id, initial_status)
         if self.database:
             self.database.create_job(job_id, tenant_id, user_id)
@@ -73,14 +73,16 @@ class AuditService:
         log_event(job_id=job_id, trace_id=trace_id, stage="queued", event="comparison.created")
         return job_id
 
-    def create_or_get_job(self, idempotency_key: str | None, fingerprint: str, tenant_id: str = "local", user_id: str = "local", trace_id: str | None = None) -> tuple[str, bool]:
+    def create_or_get_job(self, idempotency_key: str | None, fingerprint: str, tenant_id: str = "local", user_id: str = "local", trace_id: str | None = None, queue_name: str = "normal") -> tuple[str, bool]:
         if not idempotency_key:
-            return self.create_job(tenant_id=tenant_id, user_id=user_id, trace_id=trace_id), False
+            job = self.create_job(tenant_id=tenant_id, user_id=user_id, trace_id=trace_id, queue_name=queue_name)
+            self._write_status(job, {**self.status(job), "idempotency_key": None})
+            return job, False
         if len(idempotency_key) > 200 or not idempotency_key.strip():
             raise ValueError("Idempotency-Key must contain 1 to 200 characters")
         registry = self.root / "idempotency"
         registry.mkdir(parents=True, exist_ok=True)
-        key_hash = hashlib.sha256(f"{tenant_id}\0{idempotency_key}".encode("utf-8")).hexdigest()
+        key_hash = hashlib.sha256(f"{tenant_id}\0{user_id}\0{idempotency_key}".encode("utf-8")).hexdigest()
         path = registry / f"{key_hash}.json"
         job_id = new_ulid("job_")
         record = json.dumps({"fingerprint": fingerprint, "job_id": job_id, "created_at": _now()}, ensure_ascii=False).encode("utf-8")
@@ -92,13 +94,14 @@ class AuditService:
                 raise FileExistsError("Idempotency-Key was already used with a different request")
             existing_job = str(existing["job_id"])
             if not (self.jobs / existing_job).is_dir():
-                self.create_job(existing_job, tenant_id, user_id, trace_id)
+                self.create_job(existing_job, tenant_id, user_id, trace_id, queue_name)
             return existing_job, True
         with os.fdopen(descriptor, "wb") as handle:
             handle.write(record)
             handle.flush()
             os.fsync(handle.fileno())
-        self.create_job(job_id, tenant_id, user_id, trace_id)
+        self.create_job(job_id, tenant_id, user_id, trace_id, queue_name)
+        self._write_status(job_id, {**self.status(job_id), "idempotency_key": idempotency_key})
         return job_id, False
 
     def request_cancel(self, job_id: str) -> dict[str, Any]:
@@ -456,7 +459,7 @@ class AuditService:
         return json.loads(path.read_text(encoding="utf-8"))
 
     def artifact(self, job_id: str, name: str) -> Path:
-        if name not in {"excel", "json", "differences_jsonl", "html", "manifest", "product_result", "product_excel", "product_manifest", "product_issues"}:
+        if name not in {"excel", "json", "differences_jsonl", "html", "manifest", "product_result", "product_excel", "product_manifest", "product_issues", "field_report", "field_excel", "field_issues", "field_snapshot"}:
             raise FileNotFoundError("unknown artifact")
         status = self.status(job_id)
         file_name = status.get("artifacts", {}).get(name)

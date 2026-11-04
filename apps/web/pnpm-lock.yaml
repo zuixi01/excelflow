@@ -11,6 +11,9 @@ importers:
       '@vitejs/plugin-vue':
         specifier: 6.0.8
         version: 6.0.8(vite@8.2.2)(vue@3.5.20(typescript@5.9.2))
+      lucide-vue-next:
+        specifier: 0.468.0
+        version: 0.468.0(vue@3.5.20(typescript@5.9.2))
       vite:
         specifier: 8.2.2
         version: 8.2.2
@@ -319,6 +322,12 @@ packages:
   lightningcss@1.33.0:
     resolution: {integrity: sha512-WkUDrojuJs0xkgGf2udWxa3yGBRxPtxUkB79i6aCZLRgc7PM8fZe9TosfPDcvEpQZbuFASnHYmRLBLUbmLOIIA==}
     engines: {node: '>= 12.0.0'}
+
+  lucide-vue-next@0.468.0:
+    resolution: {integrity: sha512-quV/6T8YB1XK0VOEnebg3Byd8Rsan5/m95cvjnuHV4vcS3qEnLAybkrSh0hk3ppavx+V7R1PjNW+mGDvcBdz4A==}
+    deprecated: Package deprecated. Please use @lucide/vue instead.
+    peerDependencies:
+      vue: '>=3.0.1'
 
   magic-string@0.30.21:
     resolution: {integrity: sha512-vd2F4YUyEXKGcLHoq+TEyCjxueSeHnFxyyjNp80yg0XV4vUhnDer/lvvlqM/arB5bXQN5K2/3oinyCRyx8T2CQ==}
@@ -665,6 +674,10 @@ snapshots:
       lightningcss-linux-x64-musl: 1.33.0
       lightningcss-win32-arm64-msvc: 1.33.0
       lightningcss-win32-x64-msvc: 1.33.0
+
+  lucide-vue-next@0.468.0(vue@3.5.20(typescript@5.9.2)):
+    dependencies:
+      vue: 3.5.20(typescript@5.9.2)
 
   magic-string@0.30.21:
     dependencies:

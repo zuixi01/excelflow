@@ -8,6 +8,7 @@ This project uses the following direct dependencies. Version locks are maintaine
 | FastAPI | 0.141.1 | MIT | https://github.com/fastapi/fastapi | HTTP API |
 | Pydantic | 2.13.4 | MIT | https://github.com/pydantic/pydantic | Rule and report models |
 | OpenPyXL | 3.1.5 | MIT | https://foss.heptapod.net/openpyxl/openpyxl | Development-only renderer and test fixtures |
+| Pillow | 13.0.0 | MIT-CMU | https://github.com/python-pillow/Pillow | Validate and embed supplier workbook pictures without resizing original assets |
 | RapidFuzz | 3.14.5 | MIT | https://github.com/rapidfuzz/RapidFuzz | Suggestion-only fuzzy header candidates |
 | DataComPy | 1.0.4 | Apache-2.0 | https://github.com/capitalone/datacompy | Optional dataset-join cross-check adapter |
 | Pandera | 0.32.1 | MIT | https://github.com/unionai-oss/pandera | Standard-data schema validation adapter |
@@ -24,6 +25,7 @@ This project uses the following direct dependencies. Version locks are maintaine
 | Boto3 | 1.43.82 | Apache-2.0 | https://github.com/boto/boto3 | S3/MinIO artifact storage |
 | DocumentFormat.OpenXml | 3.5.1 | MIT | https://github.com/dotnet/Open-XML-SDK | Production Excel renderer |
 | Vue | 3.5.20 | MIT | https://github.com/vuejs/core | Web user interface |
+| Lucide Vue Next | 0.468.0 | ISC | https://github.com/lucide-icons/lucide | Consistent interface icons |
 | Vite | 8.2.2 | MIT | https://github.com/vitejs/vite | Web build tooling |
 | TypeScript | 5.9.2 | Apache-2.0 | https://github.com/microsoft/TypeScript | Web type checking |
 | Hypothesis | 6.165.10 | MPL-2.0 | https://github.com/HypothesisWorks/hypothesis | Property-based tests |

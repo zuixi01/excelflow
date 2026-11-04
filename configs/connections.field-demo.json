@@ -1,0 +1,15 @@
+{
+  "connections": [{
+    "id": "local-field-demo",
+    "base_url": "http://127.0.0.1:8011/",
+    "allowed_paths": ["/field-standards"],
+    "allow_private_network": true,
+    "allow_insecure_http": true,
+    "field_reconciliation": {
+      "title": "演示平台 · 商品字段",
+      "path": "/field-standards",
+      "tenant_ids": ["local"],
+      "parameter_mapping": {}
+    }
+  }]
+}

@@ -1,0 +1,24 @@
+services:
+  edge:
+    image: ${WEB_IMAGE:?set WEB_IMAGE to a scanned release image}
+    pull_policy: ${IMAGE_PULL_POLICY:-always}
+    mem_limit: 128m
+    user: "0:0"
+    environment:
+      PUBLIC_HOSTNAME: ${PUBLIC_HOSTNAME:?set PUBLIC_HOSTNAME}
+      NGINX_ENVSUBST_FILTER: ^PUBLIC_HOSTNAME$
+    volumes:
+      - ./nginx-edge.conf:/etc/nginx/templates/default.conf.template:ro
+      - ${TLS_CERT_FILE:?set TLS_CERT_FILE}:/run/secrets/tls.crt:ro
+      - ${TLS_KEY_FILE:?set TLS_KEY_FILE}:/run/secrets/tls.key:ro
+    ports:
+      - "443:443"
+    depends_on:
+      web:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "nginx", "-t"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    restart: unless-stopped

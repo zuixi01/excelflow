@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import os
+import socket
+import threading
+from uuid import uuid4
 from pathlib import Path
 from typing import Any
 
@@ -9,6 +12,7 @@ from .persistence import DatabaseRepository
 from .service import AuditService
 from .standard_sources import ConnectionRegistry, ManagedHttpSource
 from .storage import S3ArtifactStore
+from .worker_control import WorkerControl
 
 
 def run() -> None:
@@ -20,8 +24,29 @@ def run() -> None:
     validate_production_environment()
     redis_url = os.environ.get("REDIS_URL", "redis://127.0.0.1:6379/0")
     connection = Redis.from_url(redis_url)
-    queue = Queue("excel-auditor", connection=connection)
-    Worker([queue], connection=connection).work()
+    queue_name = os.environ.get("EXCEL_AUDITOR_QUEUE_NAME", "excel-auditor")
+    queue = Queue(queue_name, connection=connection)
+    Worker([queue], connection=connection, name=socket.gethostname()).work()
+
+
+def run_task(task_id: str, payload: dict[str, Any]) -> None:
+    """Compatibility entrypoint for task-control jobs.
+
+    Payloads contain references and metadata only; workers load files from the
+    configured data root instead of receiving workbook bytes through Redis.
+    """
+    operation = payload.get("operation")
+    if operation == "comparison":
+        run_job(
+            payload["data_root"],
+            task_id,
+            payload["excel_path"],
+            payload.get("standard_path"),
+            payload["rule_payload"],
+            payload.get("parameters", {}),
+        )
+        return
+    raise RuntimeError(f"unsupported task operation: {operation!r}")
 
 
 def run_job(data_root: str, job_id: str, excel_path: str, standard_path: str | None, rule_payload: dict[str, Any], parameters: dict[str, Any]) -> None:
@@ -32,7 +57,29 @@ def run_job(data_root: str, job_id: str, excel_path: str, standard_path: str | N
     s3_bucket = os.environ.get("S3_BUCKET")
     artifact_store = S3ArtifactStore(s3_bucket, os.environ.get("S3_ENDPOINT_URL"), os.environ.get("AWS_REGION"), os.environ.get("S3_SERVER_SIDE_ENCRYPTION", "AES256")) if s3_bucket else None
     service = AuditService(Path(data_root), managed_http=managed, database=database, artifact_store=artifact_store)
-    service.run(job_id, Path(excel_path), Path(standard_path) if standard_path else None, RuleSet.model_validate(rule_payload), parameters)
+    control = None
+    stopped = threading.Event()
+    thread = None
+    if database:
+        control = WorkerControl(database)
+        worker_id = f"{os.environ.get('EXCEL_AUDITOR_WORKER_ID', socket.gethostname())}:{uuid4().hex}"
+        control.start(job_id, worker_id)
+        def heartbeat():
+            while not stopped.wait(30):
+                try:
+                    if not control.heartbeat(job_id, worker_id):
+                        return
+                except Exception:
+                    import logging
+                    logging.getLogger(__name__).exception("Comparison heartbeat failed")
+        thread = threading.Thread(target=heartbeat, daemon=True)
+        thread.start()
+    try:
+        service.run(job_id, Path(excel_path), Path(standard_path) if standard_path else None, RuleSet.model_validate(rule_payload), parameters)
+    finally:
+        stopped.set()
+        if thread:
+            thread.join(timeout=5)
 
 
 def run_product_job(
@@ -94,6 +141,17 @@ def run_merchant_reconciliation_job(
         Path(excel_path),
         Path(platform_path) if platform_path else None,
         name_match_threshold=name_match_threshold,
+    )
+
+
+def run_field_reconciliation_job(
+    data_root: str, job_id: str, excel_path: str, connection_id: str, scope: dict[str, Any], tenant_id: str,
+) -> None:
+    from .field_reconciliation import FieldReconciliationService
+
+    service, managed, _database = _build_runtime(Path(data_root))
+    FieldReconciliationService(service, managed, Path(data_root) / "workflow").run(
+        job_id, Path(excel_path), connection_id, scope, tenant_id,
     )
 
 

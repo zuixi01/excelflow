@@ -30,7 +30,7 @@ services:
     build:
       context: ..
       dockerfile: deploy/Dockerfile.api
-    command: ["rq", "worker", "--url", "redis://redis:6379/0", "excel-auditor"]
+    command: ["rq", "worker", "--url", "redis://redis:6379/0", "--dequeue-strategy", "round_robin", "normal", "heavy", "network", "workflow", "workflow-export"]
     environment:
       EXCEL_AUDITOR_DATA: /data
       DATABASE_URL: postgresql+psycopg://excel_auditor:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}@postgres:5432/excel_auditor

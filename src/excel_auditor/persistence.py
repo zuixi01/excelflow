@@ -2,20 +2,37 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 from datetime import datetime, timezone
 from typing import Any
 
-from sqlalchemy import DateTime, ForeignKey, Index, Integer, JSON, String, Text, UniqueConstraint, create_engine, delete, func, insert, select
+from sqlalchemy import DateTime, ForeignKey, Index, Integer, JSON, String, Text, UniqueConstraint, create_engine, delete, func, insert, select, inspect, text
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column
 
 from .models import AuditReport, RuleSet
 from .snapshots import StandardSnapshot
 from .ids import new_ulid
 from .product_workflow.models import CategoryCatalogSnapshot, CatalogSchemaSnapshot, ProductNormalizationResult
+from .auth_models import hash_password, normalize_username, verify_password
 
 
 class Base(DeclarativeBase):
     pass
+
+
+def dialect_insert(engine, table):
+    if engine.dialect.name == "postgresql":
+        from sqlalchemy.dialects.postgresql import insert as upsert
+    else:
+        from sqlalchemy.dialects.sqlite import insert as upsert
+    return upsert(table)
+
+
+class AuthRateLimitRow(Base):
+    __tablename__ = "auth_rate_limits"
+    key: Mapped[str] = mapped_column(String(100), primary_key=True)
+    failures: Mapped[int] = mapped_column(Integer)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
 
 
 class SchemaRow(Base):
@@ -100,6 +117,11 @@ class ComparisonJobRow(Base):
     report_object_keys: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
     renderer_version: Mapped[str | None] = mapped_column(String(100), nullable=True)
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    queue_name: Mapped[str] = mapped_column(String(32), default="normal")
+    attempt: Mapped[int] = mapped_column(Integer, default=0)
+    worker_id: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    lease_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    idempotency_key: Mapped[str | None] = mapped_column(String(200), nullable=True, index=True)
 
 
 class DifferenceIndexRow(Base):
@@ -127,6 +149,65 @@ class AuditEventRow(Base):
     action: Mapped[str] = mapped_column(String(100), index=True)
     resource_type: Mapped[str] = mapped_column(String(100))
     resource_id: Mapped[str] = mapped_column(String(200))
+    metadata_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    occurred_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
+class TenantRow(Base):
+    __tablename__ = "auth_tenants"
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    name: Mapped[str] = mapped_column(String(200))
+    status: Mapped[str] = mapped_column(String(24), default="active", index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
+class UserRow(Base):
+    __tablename__ = "auth_users"
+    __table_args__ = (UniqueConstraint("tenant_id", "username_normalized", name="uq_auth_user_tenant_username"),)
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    tenant_id: Mapped[str] = mapped_column(ForeignKey("auth_tenants.id", ondelete="CASCADE"), index=True)
+    username: Mapped[str] = mapped_column(String(200))
+    username_normalized: Mapped[str] = mapped_column(String(200))
+    password_hash: Mapped[str] = mapped_column(Text)
+    role: Mapped[str] = mapped_column(String(24), default="viewer", index=True)
+    status: Mapped[str] = mapped_column(String(24), default="active", index=True)
+    failed_login_count: Mapped[int] = mapped_column(Integer, default=0)
+    locked_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_login_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
+class UserQuotaRow(Base):
+    __tablename__ = "auth_user_quotas"
+    user_id: Mapped[str] = mapped_column(ForeignKey("auth_users.id", ondelete="CASCADE"), primary_key=True)
+    max_running: Mapped[int] = mapped_column(Integer, default=2)
+    max_queued: Mapped[int] = mapped_column(Integer, default=10)
+    daily_limit: Mapped[int] = mapped_column(Integer, default=100)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
+class AuthSessionRow(Base):
+    __tablename__ = "auth_sessions"
+    __table_args__ = (Index("ix_auth_sessions_token_hash", "token_hash"),)
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    user_id: Mapped[str] = mapped_column(ForeignKey("auth_users.id", ondelete="CASCADE"), index=True)
+    token_hash: Mapped[str] = mapped_column(String(64), unique=True)
+    csrf_hash: Mapped[str] = mapped_column(String(64))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    last_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    ip_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    user_agent_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
+
+
+class AuthEventRow(Base):
+    __tablename__ = "auth_events"
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    tenant_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    user_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    action: Mapped[str] = mapped_column(String(64), index=True)
     metadata_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
     occurred_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
 
@@ -194,6 +275,25 @@ class DatabaseRepository:
         self.engine = create_engine(url, pool_pre_ping=True)
         if create_schema:
             Base.metadata.create_all(self.engine)
+            self._ensure_sqlite_compat_columns()
+
+    def _ensure_sqlite_compat_columns(self) -> None:
+        if self.engine.url.get_backend_name() != "sqlite":
+            return
+        required = {
+            "queue_name": "VARCHAR(32) NOT NULL DEFAULT 'normal'",
+            "attempt": "INTEGER NOT NULL DEFAULT 0",
+            "worker_id": "VARCHAR(200)",
+            "lease_expires_at": "DATETIME",
+            "idempotency_key": "VARCHAR(200)",
+        }
+        existing = {column["name"] for column in inspect(self.engine).get_columns("comparison_jobs")}
+        missing = required.keys() - existing
+        if not missing:
+            return
+        with self.engine.begin() as connection:
+            for name in missing:
+                connection.execute(text(f"ALTER TABLE comparison_jobs ADD COLUMN {name} {required[name]}"))
 
     def publish_rule(self, rules: RuleSet, actor_id: str | None = None, tenant_id: str = "local") -> None:
         with Session(self.engine) as session, session.begin():
@@ -218,6 +318,294 @@ class DatabaseRepository:
         with self.engine.connect() as connection:
             connection.execute(select(1))
 
+    def create_tenant(self, name: str, tenant_id: str | None = None) -> TenantRow:
+        tenant = TenantRow(id=tenant_id or new_ulid("tenant_"), name=name.strip(), status="active", created_at=_now())
+        with Session(self.engine) as session, session.begin():
+            session.add(tenant)
+            session.flush()
+            session.expunge(tenant)
+        return tenant
+
+    def ensure_local_admin(self, *, username: str, password: str) -> UserRow:
+        """Create the single configured administrator in the internal local workspace."""
+        normalized = normalize_username(username)
+        existing = self.get_user_by_username("local", normalized) or self.get_user("admin")
+        if existing:
+            if existing.tenant_id != "local" or existing.role not in {"owner", "admin"}:
+                raise ValueError("configured administrator conflicts with an existing account")
+            return existing
+        encoded_password = hash_password(password)
+        now = _now()
+        with Session(self.engine) as session, session.begin():
+            session.execute(dialect_insert(self.engine, TenantRow).values(id="local", name="ExcelFlow", status="active", created_at=now).on_conflict_do_nothing(index_elements=["id"]))
+            user = session.scalar(select(UserRow).where(UserRow.tenant_id == "local", UserRow.username_normalized == normalized))
+            if user is None:
+                user = UserRow(
+                    id="admin",
+                    tenant_id="local",
+                    username=username.strip(),
+                    username_normalized=normalized,
+                    password_hash=encoded_password,
+                    role="owner",
+                    status="active",
+                    failed_login_count=0,
+                    locked_until=None,
+                    last_login_at=None,
+                    created_at=now,
+                    updated_at=now,
+                )
+                session.execute(dialect_insert(self.engine, UserRow).values(
+                    id=user.id, tenant_id=user.tenant_id, username=user.username, username_normalized=normalized,
+                    password_hash=encoded_password, role="owner", status="active", failed_login_count=0,
+                    created_at=now, updated_at=now,
+                ).on_conflict_do_nothing())
+                user = session.scalar(select(UserRow).where(UserRow.id == "admin"))
+                if user is None or user.tenant_id != "local" or user.role not in {"owner", "admin"}:
+                    raise ValueError("configured administrator conflicts with an existing account")
+            session.flush()
+            session.expunge(user)
+        return user
+
+    def create_user(self, *, tenant_id: str, username: str, password: str, role: str) -> UserRow:
+        normalized = normalize_username(username)
+        encoded_password = hash_password(password)
+        now = _now()
+        user = UserRow(
+            id=new_ulid("user_"),
+            tenant_id=tenant_id,
+            username=username.strip(),
+            username_normalized=normalized,
+            password_hash=encoded_password,
+            role=role,
+            status="active",
+            failed_login_count=0,
+            locked_until=None,
+            last_login_at=None,
+            created_at=now,
+            updated_at=now,
+        )
+        with Session(self.engine) as session, session.begin():
+            tenant = session.get(TenantRow, tenant_id)
+            if tenant is None:
+                raise ValueError("tenant not found")
+            if tenant_id == "local" and role == "owner":
+                existing_owner = session.scalar(select(UserRow).where(UserRow.tenant_id == "local", UserRow.role == "owner", UserRow.status == "active"))
+                if existing_owner is not None:
+                    raise ValueError("local workspace already has an administrator")
+            existing = session.scalar(select(UserRow).where(UserRow.tenant_id == tenant_id, UserRow.username_normalized == normalized))
+            if existing is not None:
+                raise ValueError("username already exists")
+            session.add(user)
+            session.flush()
+            session.expunge(user)
+        return user
+
+    def create_operator(
+        self,
+        *,
+        username: str,
+        password: str,
+        role: str = "operator",
+        max_running: int = 2,
+        max_queued: int = 10,
+        daily_limit: int = 100,
+    ) -> UserRow:
+        if role not in {"operator", "viewer"}:
+            raise ValueError("operator role must be operator or viewer")
+        if min(max_running, max_queued, daily_limit) < 0:
+            raise ValueError("quota values must be non-negative")
+        user = self.create_user(tenant_id="local", username=username, password=password, role=role)
+        now = _now()
+        with Session(self.engine) as session, session.begin():
+            session.add(UserQuotaRow(user_id=user.id, max_running=max_running, max_queued=max_queued, daily_limit=daily_limit, updated_at=now))
+            session.add(_auth_event("operator.created", user.id, {"role": role}, "local"))
+        return user
+
+    def get_user_quota(self, user_id: str) -> dict[str, int]:
+        with Session(self.engine) as session:
+            row = session.get(UserQuotaRow, user_id)
+            if row is None:
+                return {"max_running": 2, "max_queued": 10, "daily_limit": 100}
+            return {"max_running": row.max_running, "max_queued": row.max_queued, "daily_limit": row.daily_limit}
+
+    def set_user_quota(self, user_id: str, *, max_running: int, max_queued: int, daily_limit: int) -> None:
+        if min(max_running, max_queued, daily_limit) < 0:
+            raise ValueError("quota values must be non-negative")
+        with Session(self.engine) as session, session.begin():
+            if session.get(UserRow, user_id) is None:
+                raise FileNotFoundError("user not found")
+            row = session.get(UserQuotaRow, user_id)
+            if row is None:
+                row = UserQuotaRow(user_id=user_id, max_running=max_running, max_queued=max_queued, daily_limit=daily_limit, updated_at=_now())
+                session.add(row)
+            else:
+                row.max_running = max_running
+                row.max_queued = max_queued
+                row.daily_limit = daily_limit
+                row.updated_at = _now()
+            session.add(_auth_event("operator.quota_updated", user_id, {"max_running": max_running, "max_queued": max_queued, "daily_limit": daily_limit}, "local"))
+
+    def get_user_by_username(self, tenant_id: str, username: str) -> UserRow | None:
+        normalized = normalize_username(username)
+        with Session(self.engine) as session:
+            row = session.scalar(select(UserRow).where(UserRow.tenant_id == tenant_id, UserRow.username_normalized == normalized))
+            if row is None:
+                return None
+            session.expunge(row)
+            return row
+
+    def verify_user_password(self, user_id: str, password: str) -> bool:
+        with Session(self.engine) as session:
+            row = session.get(UserRow, user_id)
+            if row is None or row.status != "active":
+                return False
+            return verify_password(password, row.password_hash)
+
+    def get_user(self, user_id: str) -> UserRow | None:
+        with Session(self.engine) as session:
+            row = session.get(UserRow, user_id)
+            if row is None:
+                return None
+            session.expunge(row)
+            return row
+
+    def list_users(self, tenant_id: str) -> list[UserRow]:
+        with Session(self.engine) as session:
+            rows = session.scalars(select(UserRow).where(UserRow.tenant_id == tenant_id).order_by(UserRow.username_normalized)).all()
+            for row in rows:
+                session.expunge(row)
+            return rows
+
+    def set_user_password(self, user_id: str, password: str) -> None:
+        with Session(self.engine) as session, session.begin():
+            row = session.get(UserRow, user_id)
+            if row is None:
+                raise FileNotFoundError("user not found")
+            row.password_hash = hash_password(password)
+            row.failed_login_count = 0
+            row.locked_until = None
+            row.updated_at = _now()
+
+    def update_login_failure(self, user_id: str, failed_count: int, locked_until: datetime | None) -> None:
+        with Session(self.engine) as session, session.begin():
+            row = session.scalar(select(UserRow).where(UserRow.id == user_id).with_for_update())
+            if row is not None:
+                row.failed_login_count = failed_count
+                if locked_until is not None:
+                    row.locked_until = locked_until
+                row.updated_at = _now()
+
+    def mark_login_success(self, user_id: str, now: datetime) -> None:
+        with Session(self.engine) as session, session.begin():
+            row = session.get(UserRow, user_id)
+            if row is not None:
+                row.failed_login_count = 0
+                row.locked_until = None
+                row.last_login_at = now
+                row.updated_at = now
+
+    def set_user_status(self, user_id: str, status: str) -> None:
+        with Session(self.engine) as session, session.begin():
+            row = session.get(UserRow, user_id)
+            if row is None:
+                raise FileNotFoundError("user not found")
+            row.status = status
+            row.updated_at = _now()
+
+    def update_user_role(self, user_id: str, role: str) -> None:
+        with Session(self.engine) as session, session.begin():
+            row = session.get(UserRow, user_id)
+            if row is None:
+                raise FileNotFoundError("user not found")
+            row.role = role
+            row.updated_at = _now()
+
+    def create_auth_session(self, *, user_id: str, token_hash: str, csrf_hash: str, created_at: datetime, expires_at: datetime) -> AuthSessionRow:
+        row = AuthSessionRow(
+            id=new_ulid("sess_"),
+            user_id=user_id,
+            token_hash=token_hash,
+            csrf_hash=csrf_hash,
+            created_at=created_at,
+            last_seen_at=created_at,
+            expires_at=expires_at,
+            revoked_at=None,
+            ip_hash=None,
+            user_agent_hash=None,
+        )
+        with Session(self.engine) as session, session.begin():
+            session.add(row)
+            session.flush()
+            session.expunge(row)
+        return row
+
+    def get_active_auth_session(self, token_hash: str, now: datetime | None = None) -> AuthSessionRow | None:
+        current = now or _now()
+        with Session(self.engine) as session:
+            row = session.scalar(select(AuthSessionRow).where(
+                AuthSessionRow.token_hash == token_hash,
+                AuthSessionRow.revoked_at.is_(None),
+                AuthSessionRow.expires_at > current,
+            ))
+            if row is None:
+                return None
+            user = session.get(UserRow, row.user_id)
+            tenant = session.get(TenantRow, user.tenant_id) if user else None
+            if user is None or tenant is None or user.status != "active" or tenant.status != "active":
+                return None
+            session.expunge(row)
+            return row
+
+    def revoke_auth_session(self, session_id: str, now: datetime | None = None) -> None:
+        with Session(self.engine) as session, session.begin():
+            row = session.get(AuthSessionRow, session_id)
+            if row is not None and row.revoked_at is None:
+                row.revoked_at = now or _now()
+
+    def get_auth_session(self, session_id: str) -> AuthSessionRow | None:
+        with Session(self.engine) as session:
+            row = session.get(AuthSessionRow, session_id)
+            if row is None:
+                return None
+            session.expunge(row)
+            return row
+
+    def revoke_user_sessions(self, user_id: str, now: datetime | None = None) -> int:
+        with Session(self.engine) as session, session.begin():
+            rows = session.scalars(select(AuthSessionRow).where(AuthSessionRow.user_id == user_id, AuthSessionRow.revoked_at.is_(None))).all()
+            revoked_at = now or _now()
+            for row in rows:
+                row.revoked_at = revoked_at
+            return len(rows)
+
+    def record_auth_event(self, action: str, *, tenant_id: str | None = None, user_id: str | None = None, metadata: dict[str, Any] | None = None) -> None:
+        with Session(self.engine) as session, session.begin():
+            session.add(AuthEventRow(
+                id=new_ulid("auth_evt_"),
+                tenant_id=tenant_id,
+                user_id=user_id,
+                action=action,
+                metadata_json=metadata or {},
+                occurred_at=_now(),
+            ))
+
+    def list_auth_events(self, tenant_id: str | None = None) -> list[AuthEventRow]:
+        with Session(self.engine) as session:
+            query = select(AuthEventRow).order_by(AuthEventRow.occurred_at, AuthEventRow.id)
+            if tenant_id is not None:
+                query = query.where(AuthEventRow.tenant_id == tenant_id)
+            rows = session.scalars(query).all()
+            for row in rows:
+                session.expunge(row)
+            return rows
+
+    def rotate_auth_csrf(self, session_id: str, csrf_hash: str) -> None:
+        with Session(self.engine) as session, session.begin():
+            row = session.get(AuthSessionRow, session_id)
+            if row is None or row.revoked_at is not None:
+                raise FileNotFoundError("session not found")
+            row.csrf_hash = csrf_hash
+
     def get_rule(self, schema_id: str, version: str, tenant_id: str = "local") -> RuleSet:
         with Session(self.engine) as session:
             row = session.scalar(select(SchemaVersionRow).where(SchemaVersionRow.tenant_id == tenant_id, SchemaVersionRow.schema_id == schema_id, SchemaVersionRow.version == version))
@@ -232,7 +620,15 @@ class DatabaseRepository:
 
     def create_job(self, job_id: str, tenant_id: str = "local", user_id: str = "local") -> None:
         with Session(self.engine) as session, session.begin():
-            session.add(ComparisonJobRow(id=job_id, tenant_id=tenant_id, user_id=user_id, status="queued", progress=0, created_at=_now()))
+            terminal = {"completed", "failed", "cancelled", "manual_review"}
+            workspace_active = session.scalar(select(func.count(ComparisonJobRow.id)).where(
+                ComparisonJobRow.tenant_id == "local",
+                ComparisonJobRow.status.not_in(terminal),
+            )) or 0
+            workspace_limit = int(os.environ.get("EXCEL_AUDITOR_MAX_WORKSPACE_RUNNING_JOBS", "8")) + int(os.environ.get("EXCEL_AUDITOR_MAX_WORKSPACE_QUEUED_JOBS", "100"))
+            if workspace_active >= workspace_limit:
+                raise ValueError("WORKSPACE_QUOTA_EXCEEDED: active task limit reached")
+            session.add(ComparisonJobRow(id=job_id, tenant_id=tenant_id, user_id=user_id, status="queued", progress=0, queue_name="normal", attempt=0, created_at=_now()))
             session.add(_event("comparison.created", "comparison_job", job_id, user_id, {"tenant_id": tenant_id}, tenant_id))
 
     def update_job(self, payload: dict[str, Any]) -> None:
@@ -240,9 +636,13 @@ class DatabaseRepository:
             row = session.get(ComparisonJobRow, payload["job_id"])
             if row is None:
                 return
-            for key in ["status", "progress", "schema_id", "schema_version", "standard_snapshot_id", "input_sha256", "output_sha256", "error_code", "error_message_safe"]:
+            previous_status = row.status
+            for key in ["status", "progress", "schema_id", "schema_version", "standard_snapshot_id", "input_sha256", "output_sha256", "error_code", "error_message_safe", "queue_name", "attempt", "worker_id", "lease_expires_at", "idempotency_key"]:
                 if key in payload:
-                    setattr(row, key, payload[key])
+                    value = payload[key]
+                    if key == "lease_expires_at" and isinstance(value, str):
+                        value = datetime.fromisoformat(value)
+                    setattr(row, key, value)
             if "summary" in payload:
                 row.summary_json = payload["summary"]
             if payload.get("completed_at"):
@@ -251,6 +651,16 @@ class DatabaseRepository:
                 row.retention_until = datetime.fromisoformat(payload["retention_until"])
             if payload.get("deleted_at"):
                 row.deleted_at = datetime.fromisoformat(payload["deleted_at"])
+            current_status = payload.get("status", previous_status)
+            if current_status != previous_status:
+                session.add(_event(
+                    f"comparison.{current_status}",
+                    "comparison_job",
+                    payload["job_id"],
+                    payload.get("user_id", row.user_id),
+                    {key: payload[key] for key in ("progress", "attempt", "worker_id") if key in payload},
+                    row.tenant_id,
+                ))
 
     def save_snapshot(self, snapshot: StandardSnapshot, source_type: str, tenant_id: str, object_key: str | None = None) -> None:
         with Session(self.engine) as session, session.begin():
@@ -511,6 +921,10 @@ class DatabaseRepository:
 
 def _event(action: str, resource_type: str, resource_id: str, actor_id: str | None = None, metadata: dict[str, Any] | None = None, tenant_id: str | None = None) -> AuditEventRow:
     return AuditEventRow(id=new_ulid("audit_"), tenant_id=tenant_id, actor_id=actor_id, action=action, resource_type=resource_type, resource_id=resource_id, metadata_json=metadata or {}, occurred_at=_now())
+
+
+def _auth_event(action: str, user_id: str | None, metadata: dict[str, Any] | None, tenant_id: str | None) -> AuthEventRow:
+    return AuthEventRow(id=new_ulid("auth_evt_"), tenant_id=tenant_id, user_id=user_id, action=action, metadata_json=metadata or {}, occurred_at=_now())
 
 
 def _now() -> datetime:
