@@ -81,6 +81,8 @@ def validate(values: dict[str, str], *, env_path: Path) -> None:
         raise ValueError("缺少必填配置：" + ", ".join(missing))
     if any(marker in value.lower() for value in values.values() for marker in PLACEHOLDERS):
         raise ValueError("仍有示例占位值，请填写真实地址和凭据")
+    if values.get("S3_ENDPOINT_URL") and (not values.get("S3_ACCESS_KEY_ID") or not values.get("S3_SECRET_ACCESS_KEY")):
+        raise ValueError("自定义 S3/MinIO 接口需要 S3_ACCESS_KEY_ID 和 S3_SECRET_ACCESS_KEY")
     if os.name != "nt" and stat.S_IMODE(env_path.stat().st_mode) & 0o077:
         raise ValueError("生产配置文件含密钥，建议 chmod 600")
     if len(values["EXCEL_AUDITOR_ADMIN_PASSWORD"]) < 16:

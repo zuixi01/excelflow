@@ -39,6 +39,8 @@ def test_initialized_config_passes_preflight_only_with_real_services_and_matchin
         DATABASE_URL="postgresql+psycopg://alice:secret@db.internal:5432/excel?sslmode=require",
         REDIS_URL="rediss://redis.internal:6379/0",
         S3_ENDPOINT_URL="https://s3.internal",
+        S3_ACCESS_KEY_ID="test-access-id",
+        S3_SECRET_ACCESS_KEY="test-secret-key",
         PUBLIC_HOSTNAME="excel.internal",
         SERVICE_CA_FILE=str(directory / "service-ca.pem"),
     )
@@ -47,3 +49,5 @@ def test_initialized_config_passes_preflight_only_with_real_services_and_matchin
         validate({**values, "PUBLIC_HOSTNAME": "other.internal"}, env_path=env_file)
     with pytest.raises(ValueError, match="127.0.0.1"):
         validate({**values, "EXCEL_AUDITOR_TRUSTED_PROXY_IPS": "127.0.0.1"}, env_path=env_file)
+    with pytest.raises(ValueError, match="S3_ACCESS_KEY_ID"):
+        validate({**values, "S3_ACCESS_KEY_ID": ""}, env_path=env_file)

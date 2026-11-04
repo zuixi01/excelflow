@@ -14,7 +14,7 @@ cd excelflow
 python3 tools/production_init.py --directory "$HOME/.config/excelflow"
 ```
 
-初始化只生成 API 令牌、管理员初始密码、平台字段加密密钥和私有配置文件，不会覆盖已有文件。编辑 `$HOME/.config/excelflow/production.env`，填写 PostgreSQL/Redis/S3 地址及凭据、实际域名；将证书及私钥放在该目录对应路径，把**真实模型密钥**写入 `model-key`。配置文件和 TLS 私钥设为 `600`；模型密钥与平台加密密钥须属于 `SECRET_READ_GID` 指定的主机组、权限为 `640`，这样非 root 的 API/Worker 容器才能只读挂载。初始化默认写入执行用户的组 ID。`SERVICE_CA_FILE` 指向供容器验证 PostgreSQL、Redis、S3 和模型 HTTPS 证书的 CA 包；公司内部 CA 应加入该包，Redis URL 如需显式指定可附加 `ssl_ca_certs=/run/secrets/service-ca.pem`。若公司 CA 尚未在服务器信任列表中，还应填写供部署脚本验证网页 HTTPS 的 `TLS_CA_FILE`。镜像仓库为私有时，先执行 `docker login ghcr.io`。证书须覆盖 `PUBLIC_HOSTNAME`，有效期至少剩余 30 天。不要将配置和密钥提交到 Git。
+初始化只生成 API 令牌、管理员初始密码、平台字段加密密钥和私有配置文件，不会覆盖已有文件。编辑 `$HOME/.config/excelflow/production.env`，填写 PostgreSQL/Redis/S3 地址及凭据、实际域名；自建 S3/MinIO 必须填写 `S3_ACCESS_KEY_ID` 与 `S3_SECRET_ACCESS_KEY`；使用云实例角色且不配置自定义 `S3_ENDPOINT_URL` 时可留空。将证书及私钥放在该目录对应路径，把**真实模型密钥**写入 `model-key`。配置文件和 TLS 私钥设为 `600`；模型密钥与平台加密密钥须属于 `SECRET_READ_GID` 指定的主机组、权限为 `640`，这样非 root 的 API/Worker 容器才能只读挂载。初始化默认写入执行用户的组 ID。`SERVICE_CA_FILE` 指向供容器验证 PostgreSQL、Redis、S3 和模型 HTTPS 证书的 CA 包；公司内部 CA 应加入该包，Redis URL 如需显式指定可附加 `ssl_ca_certs=/run/secrets/service-ca.pem`。若公司 CA 尚未在服务器信任列表中，还应填写供部署脚本验证网页 HTTPS 的 `TLS_CA_FILE`。镜像仓库为私有时，先执行 `docker login ghcr.io`。证书须覆盖 `PUBLIC_HOSTNAME`，有效期至少剩余 30 天。不要将配置和密钥提交到 Git。
 
 ```sh
 bash deploy/production.sh check "$HOME/.config/excelflow/production.env"
